@@ -1,0 +1,33 @@
+# Secrets — never commit
+credentials.json
+token.json
+*.pem
+.env
+
+# Virtual environment
+job_pipe_env/
+venv/
+.venv/
+env/
+
+# Personal data
+data/profile.md
+data/fact_bank.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
