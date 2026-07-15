@@ -5,6 +5,8 @@ LEARN: Gmail API OAuth flow, Gmail query syntax (from:, subject:, newer_than:),
 """
 from __future__ import annotations
 import os.path
+import base64
+import json
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -25,10 +27,11 @@ def fetch_job_emails(query: str = 'subject:(job OR role) newer_than:7d') -> list
     service = _gmail_service()
     resp = service.users().messages().list(userId="me", q=query).execute()
     results = []
-    for msg in resp.get("message", []):
+    for msg in resp.get("messages", []):
       msg_id = msg["id"]
       full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
       body = extract_text(full["payload"])
+      print(json.dumps(full["payload"], indent=2)[:2000])
       results.append((msg_id, body))
     return results  
 
@@ -57,8 +60,11 @@ def _gmail_service():
   service = build("gmail", "v1", credentials=creds)
   return service
 
-def extract_text():
-  pass
+def extract_text(payload):
+  mime = payload.get("mimeType")
+  if mime == "text/plain":
+    data = payload["body"]["data"]
+    return base64.urlsafe_b64decode(data).decode("utf-8")
 
 if __name__ == "__main__":
   print(fetch_job_emails())
