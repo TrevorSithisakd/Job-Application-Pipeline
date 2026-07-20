@@ -40,13 +40,57 @@ def init() -> None:
 
 
 def upsert_job(email_id: str, job: Job) -> int:
-    """Idempotent: same email never creates two rows. TODO: return job id."""
-    raise NotImplementedError
+    """Insert a job, or update it if this email_id was already ingested.
+
+    Idempotent: re-running the pipeline over the same inbox never creates
+    duplicate rows. The ON CONFLICT clause fires because email_id is UNIQUE.
+    Returns the row's id (needed by set_fit and the resume stage).
+    """
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute(
+            """
+            INSERT INTO jobs (email_id, source, company, title, jd_text,
+                              location, salary, deadline, url)
+            VALUES (:email_id, :source, :company, :title, :jd_text,
+                    :location, :salary, :deadline, :url)
+            ON CONFLICT(email_id) DO UPDATE SET
+                source=excluded.source, company=excluded.company,
+                title=excluded.title, jd_text=excluded.jd_text,
+                location=excluded.location, salary=excluded.salary,
+                deadline=excluded.deadline, url=excluded.url
+            """,
+            {
+                "email_id": email_id,
+                "source": job.source,
+                "company": job.company,
+                "title": job.title,
+                "jd_text": job.jd_text,
+                "location": job.location,
+                "salary": job.salary,
+                # SQLite has no date type; store ISO text (or NULL).
+                "deadline": job.deadline.isoformat() if job.deadline else None,
+                "url": job.url,
+            },
+        )
+        # lastrowid is unreliable on the UPDATE path, so look the id up by key.
+        row = c.execute("SELECT id FROM jobs WHERE email_id = ?", (email_id,)).fetchone()
+        return row[0]
 
 
 def set_fit(job_id: int, fit: FitScore) -> None:
-    raise NotImplementedError
+    """Write the fit-score results onto an existing job row."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute(
+            "UPDATE jobs SET fit_score = ?, fit_rationale = ?, track = ? WHERE id = ?",
+            (fit.score, fit.rationale, fit.track, job_id),
+        )
 
 
 def all_jobs() -> list[dict]:
-    raise NotImplementedError
+    """Every job as a dict, best fit first (unscored rows sink to the bottom)."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row  # rows behave like dicts instead of tuples
+        rows = c.execute(
+            "SELECT * FROM jobs ORDER BY fit_score IS NULL, fit_score DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]

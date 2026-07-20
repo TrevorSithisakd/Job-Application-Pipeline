@@ -1,7 +1,7 @@
 # v1 — keep it small. Add embeddings/vector store only in Phase 2.
 pydantic>=2
+openai>=1.0          # used as the client for DeepSeek's OpenAI-compatible API
+python-dotenv        # loads secrets from .env so keys stay out of the shell env
 streamlit
 google-api-python-client
 google-auth-oauthlib
-# one LLM client — pick your provider:
-# openai   (or)   anthropic
