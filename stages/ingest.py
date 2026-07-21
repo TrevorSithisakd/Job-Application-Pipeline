@@ -109,7 +109,9 @@ def _strip_html(raw):
 
 def _clean_text(text):
   text = text.split("This email was intended")[0]
-  text = re.sub(r"\?\S+", "", text)    # drop '?' and everything non-space after it
+  # NOTE: do NOT strip "?..." here. A previous `re.sub(r"\?\S+", "", text)`
+  # deleted every URL query string, which is exactly where Indeed stores the
+  # job id (?jk=...) — it collapsed real links to a dead /rc/clk/dl stub.
   text = text.replace("\r\n", "\n")          # normalize Windows line endings first
   text = re.sub(r"\n{3,}", "\n\n", text)     # collapse 3+ newlines to a paragraph break
   return text
