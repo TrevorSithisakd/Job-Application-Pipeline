@@ -14,17 +14,17 @@ LEARN: LLM API calls, structured/JSON output, temperature, retry+backoff,
 from __future__ import annotations
 import os
 import time
-from pathlib import Path
 from typing import Type, TypeVar
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel
+from paths import ENV_FILE
 
 T = TypeVar("T", bound=BaseModel)
 
 # Load .env from the project root, not the cwd, so stages work when run from
 # anywhere. A real environment variable always wins over the file.
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv(ENV_FILE)
 
 _API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 if not _API_KEY:
@@ -46,6 +46,11 @@ MODELS = {
 def call_llm(system: str, user: str, tier: str = "cheap",
              temperature: float = 0.0, json_mode: bool = False) -> str:
     """Raw text call to DeepSeek."""
+    if json_mode and "json" not in f"{system}{user}".lower():
+        # DeepSeek hard-rejects json_object mode unless the prompt says "json".
+        # A stage that forgets fails 400 on EVERY call, so guarantee it here
+        # rather than trusting each prompt to remember.
+        system = f"{system}\n\nRespond with a single valid JSON object."
     kwargs: dict = dict(
         model=MODELS[tier],
         messages=[

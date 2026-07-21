@@ -5,10 +5,11 @@ LEARN: Streamlit basics (st.dataframe, st.selectbox, session_state), reading
 """
 import sqlite3
 import streamlit as st
+from paths import DB_PATH
 
 st.title("Job Application Pipeline")
 
-with sqlite3.connect("applications.db") as c:
+with sqlite3.connect(DB_PATH) as c:
     rows = c.execute(
         "SELECT company, title, fit_score, track, deadline, url FROM jobs "
         "ORDER BY fit_score DESC"

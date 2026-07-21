@@ -5,10 +5,8 @@ LEARN: SQL basics, schema design, foreign keys, the sqlite3 module,
 """
 from __future__ import annotations
 import sqlite3
-from pathlib import Path
+from paths import DB_PATH
 from schemas import Job, FitScore
-
-DB_PATH = Path("applications.db")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (

@@ -9,18 +9,36 @@ LEARN: instructions-vs-context distinction, rubric design, constrained outputs,
        calibration (does a 70 mean the same thing across roles?).
 """
 from __future__ import annotations
-from pathlib import Path
+import json
+from paths import PROFILE_FILE
 from schemas import Job, FitScore
 from llm import call_structured
 
-RUBRIC = """
+RUBRIC = f"""
 Score 0-100 how well THIS candidate fits THIS role. Weigh:
 - skills/tools overlap, seniority match, location (Sydney/remote-AU), track fit.
 Pick track: ml-engineer | data-scientist | data-analyst | none.
 List keywords in the JD that are missing from the candidate profile.
+
+Reply with ONLY a JSON object conforming to this schema:
+{json.dumps(FitScore.model_json_schema(), indent=2)}
+
+Do not wrap it in prose or markdown fences.
 """
 
-PROFILE = Path("data/profile.md").read_text() if Path("data/profile.md").exists() else ""
+def _load_profile() -> str:
+    """Fail loudly. Scoring against an empty profile produces numbers that look
+    fine and mean nothing, so a missing profile must stop the run, not default.
+    """
+    if not PROFILE_FILE.exists():
+        raise FileNotFoundError(
+            f"No candidate profile at {PROFILE_FILE}. Fit scores would be "
+            "meaningless without it."
+        )
+    return PROFILE_FILE.read_text(encoding="utf-8")
+
+
+PROFILE = _load_profile()
 
 
 def fit_score(job: Job) -> FitScore:

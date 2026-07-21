@@ -4,11 +4,10 @@ LEARN: Gmail API OAuth flow, Gmail query syntax (from:, subject:, newer_than:),
        MIME/email parsing, stripping HTML to clean text.
 """
 from __future__ import annotations
-import os.path
 import base64
-import json
 import re
 import sys
+from html import unescape
 
 from collections import Counter
 from google.auth.transport.requests import Request
@@ -16,6 +15,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from paths import CREDENTIALS_FILE, TOKEN_FILE
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
@@ -38,8 +38,14 @@ def fetch_job_emails(query: str = (
       full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
       body = extract_text(full["payload"])
 
+      # Never hand a None/blank body downstream: the API rejects non-string
+      # content outright, which reads as a confusing 400 rather than "no text".
+      if not body or not body.strip():
+        print(f"  [no body] {msg_id}")
+        continue
+
       results.append((msg_id, body))
-    return results  
+    return results
 
 def _gmail_service():
   """Gets the service object for credentials for gmail API
@@ -48,34 +54,58 @@ def _gmail_service():
   # The file token.json stores the user's access and refresh tokens, and is
   # created automatically when the authorization flow completes for the first
   # time.
-  if os.path.exists("token.json"):
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+  if TOKEN_FILE.exists():
+    creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
   # If there are no (valid) credentials available, let the user log in.
   if not creds or not creds.valid:
     if creds and creds.expired and creds.refresh_token:
       creds.refresh(Request())
     else:
       flow = InstalledAppFlow.from_client_secrets_file(
-          "credentials.json", SCOPES
+          str(CREDENTIALS_FILE), SCOPES
       )
       creds = flow.run_local_server(port=0)
     # Save the credentials for the next run
-    with open("token.json", "w") as token:
-      token.write(creds.to_json())
+    TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
   # build the resource
   service = build("gmail", "v1", credentials=creds)
   return service
 
 def extract_text(payload):
-  mime = payload.get("mimeType")
-  if mime == "text/plain":
-    data = payload["body"]["data"]
-    return _clean_text(base64.urlsafe_b64decode(data).decode("utf-8"))
-  if payload.get("parts"):
-    for part in payload["parts"]:
-      text = extract_text(part)
-      if text:
-        return text
+  """Best available body text, or None if the email carries none.
+
+  Prefers text/plain across the WHOLE MIME tree before falling back to HTML —
+  a plain part nested deeper than an HTML one still wins. Alerts that ship
+  HTML only used to fall through here and return None, which the API then
+  rejected as a malformed request.
+  """
+  plain = _find_part(payload, "text/plain")
+  if plain:
+    return _clean_text(plain)
+  html_body = _find_part(payload, "text/html")
+  if html_body:
+    return _clean_text(_strip_html(html_body))
+  return None
+
+def _find_part(payload, mime):
+  """Depth-first search of the MIME tree for the first part of `mime`."""
+  if payload.get("mimeType") == mime:
+    data = payload.get("body", {}).get("data")
+    if data:
+      # errors="replace" so one bad byte degrades a character, not the run.
+      return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+  for part in payload.get("parts") or []:
+    found = _find_part(part, mime)
+    if found:
+      return found
+  return None
+
+def _strip_html(raw):
+  """Crude tag strip. Good enough for job alerts; not a general HTML parser."""
+  raw = re.sub(r"(?is)<(script|style).*?</\1>", "", raw)   # drop non-content
+  raw = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", raw)  # blocks -> newlines
+  raw = re.sub(r"<[^>]+>", "", raw)                       # remaining tags
+  return unescape(raw)                                    # &amp; -> &
 
 def _clean_text(text):
   text = text.split("This email was intended")[0]
