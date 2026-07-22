@@ -23,3 +23,6 @@ TOKEN_FILE = ROOT / "token.json"
 # Personal data (gitignored) — read as context by the fit-score and resume stages.
 PROFILE_FILE = ROOT / "data" / "profile.md"
 FACT_BANK_FILE = ROOT / "data" / "fact_bank.md"
+
+# Generated resume drafts (gitignored): data/resumes/<job_id>/v<n>.json + .md
+RESUMES_DIR = ROOT / "data" / "resumes"

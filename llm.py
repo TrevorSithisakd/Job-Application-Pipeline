@@ -69,14 +69,19 @@ def call_llm(system: str, user: str, tier: str = "cheap",
 
 
 def call_structured(system: str, user: str, schema: Type[T],
-                    tier: str = "cheap", retries: int = 2) -> T:
+                    tier: str = "cheap", retries: int = 2,
+                    temperature: float = 0.0) -> T:
     """Call, parse JSON into `schema` (pydantic model), retry on failure.
 
     json_mode=True asks DeepSeek to emit valid JSON. Your prompt must mention
     JSON for this to engage — the stage system prompts already do.
+
+    temperature defaults to 0 (deterministic parsing). The resume tailor passes
+    a little warmth for prose; structure still holds because json_mode + this
+    validation + retry catch malformed output regardless of sampling.
     """
     for attempt in range(retries + 1):
-        raw = call_llm(system, user, tier=tier, temperature=0.0, json_mode=True)
+        raw = call_llm(system, user, tier=tier, temperature=temperature, json_mode=True)
         try:
             return schema.model_validate_json(_extract_json(raw))
         except Exception:
