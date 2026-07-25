@@ -20,17 +20,46 @@ from paths import CREDENTIALS_FILE, TOKEN_FILE
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-def fetch_job_emails(query: str = (
-    'from:(jobalerts-noreply@linkedin.com OR jobs-noreply@linkedin.com '
+_SENDERS = (
+    'jobalerts-noreply@linkedin.com OR jobs-noreply@linkedin.com '
     'OR jobs-listings@linkedin.com OR notifications@us.greenhouse-jobs.com '
-    'OR seek.com.au OR indeed.com OR jobs2web.com) newer_than:7d'
-)) -> list[tuple[str, str]]:
-    """Return [(gmail_message_id, clean_text_body), ...].
+    'OR seek.com.au OR indeed.com OR jobs2web.com'
+)
+
+
+def credentials_ready() -> bool:
+    """True if a Gmail service can be built WITHOUT an interactive login — i.e.
+    the token is valid or silently refreshable. The web app calls this before an
+    ingest run, because a browser fetch can't complete the OAuth consent flow.
+    """
+    if not TOKEN_FILE.exists():
+        return False
+    try:
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
+    except Exception:
+        return False
+    if creds.valid:
+        return True
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
+            return True
+        except RefreshError:
+            return False
+    return False
+
+
+def fetch_job_emails(days: int = 7, query: str | None = None) -> list[tuple[str, str]]:
+    """Return [(gmail_message_id, clean_text_body), ...] for alerts in the last
+    `days` days. `query` overrides the built default entirely.
 
     Senders found via audit_senders(); re-run it periodically to catch new ones.
     Note: noreply@s.seek.com.au also sends application-status emails - those flow
     through here by design and get rejected downstream (extract/fitscore).
     """
+    if query is None:
+        query = f"from:({_SENDERS}) newer_than:{days}d"
     service = _gmail_service()
     resp = service.users().messages().list(userId="me", q=query).execute()
     results = []

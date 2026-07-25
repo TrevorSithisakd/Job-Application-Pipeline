@@ -91,7 +91,6 @@ class TailorResult:
     draft: ResumeDraft
     grounding: GroundingResult
     json_path: str
-    md_path: str
     docx_path: str
 
 
@@ -166,28 +165,6 @@ def check_grounding(draft: ResumeDraft) -> GroundingResult:
     return GroundingResult(claims=resolved)
 
 
-def _render_markdown(d: ResumeDraft) -> str:
-    """A readable preview for the dashboard/CLI. NOT the deliverable — the
-    one-page docx renderer is Phase C. Deterministic: no LLM here."""
-    out = [f"_{d.tagline}_", "", d.profile, "", "## Projects"]
-    for p in d.projects:
-        out.append(f"### {p.title} — {p.angle} ({p.year})")
-        out.append(f"_{p.stack} · {p.url}_")
-        out += [f"- {b}" for b in p.bullets]
-        out.append("")
-    out.append("## Skills")
-    out += [f"- **{s.label}:** {s.content}" for s in d.skills]
-    out += ["", "## Education", d.education]
-    if d.experience:
-        out += ["", "## Experience"]
-        for e in d.experience:
-            out.append(f"### {e.role}, {e.org} ({e.dates})")
-            out += [f"- {b}" for b in e.bullets]
-    if d.additional:
-        out += ["", f"**Additional:** {d.additional}"]
-    return "\n".join(out)
-
-
 def tailor_job(job_id: int) -> TailorResult:
     """Full stage: load job -> draft -> persist as pending. The single entry
     point the dashboard button (Phase E) will call.
@@ -200,13 +177,11 @@ def tailor_job(job_id: int) -> TailorResult:
     draft = draft_structured(job)
     grounding = check_grounding(draft)           # safety layer 1: fact-check every claim
     resume_id, version, json_path = db.save_resume(job_id, draft, grounding=grounding)
-    md_path = json_path.with_suffix(".md")
-    md_path.write_text(_render_markdown(draft), encoding="utf-8")
     docx_path = render(draft, job_id, version)   # deterministic: draft -> .docx deliverable
     return TailorResult(
         job_id=job_id, resume_id=resume_id, version=version,
         draft=draft, grounding=grounding,
-        json_path=str(json_path), md_path=str(md_path), docx_path=str(docx_path),
+        json_path=str(json_path), docx_path=str(docx_path),
     )
 
 
@@ -227,10 +202,7 @@ if __name__ == "__main__":
     _g = _result.grounding
     _ok = len(_g.claims) - len(_g.flagged)
     print(f"Drafted resume v{_result.version} (pending)")
-    print(f"  preview: {_result.md_path}")
     print(f"  docx:    {_result.docx_path}")
     print(f"Grounding: {_ok}/{len(_g.claims)} claims supported.")
     for _c in _g.flagged:
         print(f"  [FLAG] {_c.claim}")
-    print()
-    print(_render_markdown(_result.draft))

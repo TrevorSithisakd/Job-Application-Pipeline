@@ -3,205 +3,429 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Job Application Pipeline</title>
+<title>Job Pipeline</title>
+<link rel="stylesheet" href="/styles.css">
 <style>
-  :root {
-    --bg: #0e1117; --panel: #171b24; --panel2: #1e232e; --border: #2a3140;
-    --text: #e6e9ef; --muted: #9aa4b2; --accent: #4c8dff; --accent2: #3a6fd8;
-    --good: #2ecc71; --warn: #f0a020; --bad: #ff5c5c;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; font: 14px/1.5 -apple-system, Segoe UI, Roboto, sans-serif;
-    background: var(--bg); color: var(--text); height: 100vh; overflow: hidden;
-  }
-  .app { display: grid; grid-template-columns: 380px 1fr; height: 100vh; }
-  /* Sidebar */
-  .sidebar { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
-  .sidebar header { padding: 16px 18px; border-bottom: 1px solid var(--border); }
-  .sidebar h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
-  .sidebar .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  .joblist { overflow-y: auto; flex: 1; }
-  .job {
-    padding: 12px 18px; border-bottom: 1px solid var(--border); cursor: pointer;
-    display: flex; gap: 10px; align-items: flex-start;
-  }
-  .job:hover { background: var(--panel); }
-  .job.active { background: var(--panel2); border-left: 3px solid var(--accent); padding-left: 15px; }
-  .job .body { flex: 1; min-width: 0; }
-  .job .co { font-weight: 600; }
-  .job .ti { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .score { font-weight: 700; font-size: 13px; padding: 2px 8px; border-radius: 20px; background: var(--panel2); }
-  .score.hi { color: var(--good); } .score.mid { color: var(--warn); } .score.lo { color: var(--muted); }
-  /* Main */
-  .main { overflow-y: auto; padding: 26px 32px; }
-  .empty { color: var(--muted); margin-top: 20vh; text-align: center; }
-  .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
-  .head h2 { margin: 0 0 4px; font-size: 20px; }
-  .head .co { color: var(--muted); }
-  .meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
-  .chip { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 3px 9px; font-size: 12px; color: var(--muted); }
-  .chip a { color: var(--accent); text-decoration: none; }
-  h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin: 24px 0 10px; }
-  .jd { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; white-space: pre-wrap; color: #cfd6e0; }
-  textarea.jd-edit { width: 100%; min-height: 200px; resize: vertical; font: inherit; line-height: 1.5; }
-  .hint { text-transform: none; font-weight: 400; color: var(--muted); font-size: 11px; }
-  button {
-    font: inherit; cursor: pointer; border: none; border-radius: 7px; padding: 9px 16px;
-    background: var(--accent); color: #fff; font-weight: 600;
-  }
-  button:hover { background: var(--accent2); }
-  button:disabled { opacity: .55; cursor: default; }
-  button.ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
-  .resume { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; }
-  .resume .top { display: flex; align-items: center; gap: 10px; }
-  .resume .ver { font-weight: 700; }
-  .badge { font-size: 11px; padding: 2px 8px; border-radius: 20px; font-weight: 600; }
-  .badge.good { background: rgba(46,204,113,.15); color: var(--good); }
-  .badge.bad { background: rgba(255,92,92,.15); color: var(--bad); }
-  .badge.appr { background: rgba(76,141,255,.18); color: var(--accent); }
-  .resume .actions { margin-left: auto; display: flex; gap: 8px; }
-  .flags { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
-  .flags .f { color: var(--bad); font-size: 12.5px; margin: 4px 0; }
-  a.dl { text-decoration: none; }
-  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel2); border: 1px solid var(--border); padding: 12px 18px; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.4); opacity: 0; transition: opacity .2s; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .jobcard { background: var(--color-surface); padding: 12px 16px 14px; cursor: pointer; }
+  .jobcard:hover { box-shadow: var(--shadow-md); }
+  .col-drop { transition: background .12s; }
+  .col-drop.over { background: color-mix(in srgb, var(--color-accent) 8%, transparent); }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--color-text); color: var(--color-bg); padding: 12px 18px; font-size: 13px; box-shadow: var(--shadow-lg); z-index: 50; opacity: 0; transition: opacity .2s; pointer-events: none; }
   .toast.show { opacity: 1; }
 </style>
 </head>
 <body>
-<div class="app">
-  <aside class="sidebar">
-    <header>
-      <h1>Job Application Pipeline</h1>
-      <div class="sub" id="jobcount">Loading…</div>
-    </header>
-    <div class="joblist" id="joblist"></div>
-  </aside>
-  <main class="main" id="main">
-    <div class="empty">Select a job to see its description and tailored resumes.</div>
-  </main>
-</div>
+<div id="app"></div>
 <div class="toast" id="toast"></div>
 
 <script>
+const STATUSES = ["interested", "applied", "interviewing", "offer", "rejected"];
+const APP = { view: "board", boardView: "board", jobs: [], stats: {}, job: null, resume: null, rtab: "preview", query: "", tailoring: false, tailorStage: "", ingestDays: 3, ingesting: false, ingestMsg: "" };
+
 const $ = (id) => document.getElementById(id);
-let JOBS = [], activeId = null;
+const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const api = async (path, opts) => { const r = await fetch(path, opts); if (!r.ok) throw new Error(await r.text()); return r.status === 204 ? null : r.json(); };
+const scoreColor = (f) => f == null ? "var(--color-neutral-500)" : f >= 75 ? "var(--color-accent)" : f >= 50 ? "var(--color-neutral-900)" : "var(--color-neutral-600)";
+const scoreLabel = (f) => f == null ? "–" : f;
 
-const scoreClass = (s) => s == null ? 'lo' : s >= 75 ? 'hi' : s >= 50 ? 'mid' : 'lo';
-const esc = (s) => (s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2800); }
 
-function toast(msg) {
-  const t = $('toast'); t.textContent = msg; t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 2600);
+// --- data loads -------------------------------------------------------------
+async function loadBoard() {
+  [APP.jobs, APP.stats] = await Promise.all([api("/api/jobs"), api("/api/stats")]);
+  APP.view = "board"; render();
 }
-
-async function loadJobs() {
-  JOBS = await (await fetch('/api/jobs')).json();
-  $('jobcount').textContent = `${JOBS.length} roles ingested`;
-  $('joblist').innerHTML = JOBS.map(j => `
-    <div class="job ${j.id === activeId ? 'active' : ''}" onclick="openJob(${j.id})">
-      <div class="body">
-        <div class="co">${esc(j.company)}</div>
-        <div class="ti">${esc(j.title)}</div>
-      </div>
-      <div class="score ${scoreClass(j.fit_score)}">${j.fit_score ?? '–'}</div>
-    </div>`).join('');
-}
-
 async function openJob(id) {
-  activeId = id;
-  document.querySelectorAll('.job').forEach(e => e.classList.remove('active'));
-  await loadJobs();
-  const job = await (await fetch(`/api/jobs/${id}`)).json();
-  renderJob(job);
+  APP.job = await api(`/api/jobs/${id}`);
+  APP.resume = APP.job.resumes.length ? await api(`/api/resumes/${APP.job.resumes[0].id}`) : null;
+  APP.rtab = "preview"; APP.view = "job"; render();
+}
+async function selectResume(rid) { APP.resume = await api(`/api/resumes/${rid}`); APP.rtab = "preview"; render(); }
+function go(view) { APP.view = view; render(); if (view === "board") loadBoard(); }
+
+// --- actions ----------------------------------------------------------------
+async function setStatus(id, status) {
+  await api(`/api/jobs/${id}/status`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status }) });
+  const j = APP.jobs.find(x => x.id === id); if (j) j.status = status;
+  if (APP.job && APP.job.id === id) APP.job.status = status;
+  toast(`Moved to ${status}.`); render();
+}
+async function saveJd(id) {
+  const jd = $("jdText").value;
+  const d = await api(`/api/jobs/${id}/jd`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jd_text: jd }) });
+  APP.job.jd_text = jd; toast(`JD saved (${d.chars} chars).`);
+}
+async function approve(rid) { await api(`/api/resumes/${rid}/approve`, { method: "POST" }); toast("Approved."); await openJob(APP.job.id); }
+function download(rid) { window.location = `/api/resumes/${rid}/docx`; }
+
+async function tailor(id) {
+  APP.tailoring = true;
+  const stages = ["Drafting from fact bank…", "Grounding check…", "Rendering .docx…"];
+  let i = 0; APP.tailorStage = stages[0]; render();
+  const timer = setInterval(() => { i = Math.min(i + 1, stages.length - 1); APP.tailorStage = stages[i]; const el = $("tailorStage"); if (el) el.textContent = stages[i]; }, 7000);
+  try {
+    const res = await api(`/api/jobs/${id}/tailor`, { method: "POST" });
+    toast(res.grounded ? `v${res.version} drafted — all claims grounded` : `v${res.version} drafted — ${res.flagged.length} flagged`);
+  } catch (e) { toast("Tailoring failed — check the server console."); }
+  finally { clearInterval(timer); APP.tailoring = false; await openJob(id); }
 }
 
-function renderJob(job) {
-  const meta = [
-    job.track && `<span class="chip">${esc(job.track)}</span>`,
-    job.location && `<span class="chip">${esc(job.location)}</span>`,
-    job.salary && `<span class="chip">${esc(job.salary)}</span>`,
-    job.url && `<span class="chip"><a href="${esc(job.url)}" target="_blank">Open posting ↗</a></span>`,
-  ].filter(Boolean).join('');
+async function saveNewJob() {
+  const g = (k) => $("f_" + k).value.trim();
+  if (!g("company") || !g("title")) { toast("Company and title are required."); return; }
+  const body = { company: g("company"), title: g("title"), url: g("url") || null, location: g("location") || null, salary: g("salary") || null, deadline: g("deadline") || null, jd_text: $("f_jd").value };
+  toast("Saving & fit-scoring…");
+  const job = await api("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  await openJob(job.id);
+}
 
-  $('main').innerHTML = `
-    <div class="head">
-      <div>
-        <h2>${esc(job.title)}</h2>
-        <div class="co">${esc(job.company)}</div>
-      </div>
-      <button id="tailorBtn" onclick="tailor(${job.id})">✨ Tailor resume</button>
+async function runPipeline() {
+  try {
+    await api("/api/ingest", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ days: APP.ingestDays }) });
+  } catch (e) {
+    let msg = "Could not start ingest.";
+    try { msg = JSON.parse(e.message).detail || msg; } catch (_) {}
+    toast(msg); return;
+  }
+  APP.ingesting = true; APP.ingestMsg = "starting…"; render();
+  const timer = setInterval(async () => {
+    const s = await api("/api/ingest/status");
+    APP.ingestMsg = (s.message || "running…") + (s.scored ? ` · ${s.scored} new scored` : "");
+    if (APP.view === "board") render();
+    if (!s.running && s.done) {
+      clearInterval(timer); APP.ingesting = false;
+      toast(s.error ? "Ingest error: " + s.error : `Ingest done — ${s.scored} new job(s) scored`);
+      await loadBoard();
+    }
+  }, 1500);
+}
+
+async function archiveJob(id) {
+  if (!confirm("Delete this role and any drafted resumes? This can't be undone.")) return;
+  await api(`/api/jobs/${id}`, { method: "DELETE" });
+  toast("Role deleted."); go("board");
+}
+
+// --- render -----------------------------------------------------------------
+function render() {
+  if (APP.view === "job") $("app").innerHTML = header() + viewJob();
+  else if (APP.view === "add") $("app").innerHTML = header() + viewAdd();
+  else $("app").innerHTML = header() + viewBoard();
+  if (APP.view === "board" && APP.boardView === "board") wireDrag();
+}
+
+function header() {
+  return `<div class="nav" style="position:sticky;top:0;z-index:20;background:var(--color-bg)">
+    <div class="nav-brand">JOB&nbsp;PIPELINE</div>
+    <div style="display:flex;gap:14px;margin-right:auto">
+      <button class="btn btn-ghost" style="text-transform:uppercase;font-size:13px;letter-spacing:.06em" onclick="go('board')">Board</button>
+      <button class="btn btn-ghost" style="text-transform:uppercase;font-size:13px;letter-spacing:.06em" onclick="go('add')">Add role</button>
     </div>
-    <div class="meta">${meta || '<span class="chip">no metadata</span>'}</div>
-    ${job.fit_rationale ? `<h3>Fit rationale (${job.fit_score})</h3><div class="jd">${esc(job.fit_rationale)}</div>` : ''}
-    <h3>Job description <span class="hint">— alerts only carry a teaser; paste the full JD from the posting, Save, then Tailor</span></h3>
-    <textarea id="jdText" class="jd jd-edit" placeholder="Paste the full job description here…">${esc(job.jd_text)}</textarea>
-    <div style="margin-top:8px"><button class="ghost" onclick="saveJd(${job.id})">Save JD</button></div>
-    <h3>Tailored resumes</h3>
-    <div id="resumes">${renderResumes(job.resumes)}</div>`;
+    <div style="display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700)">
+      <span style="width:7px;height:7px;background:var(--color-accent);display:block"></span>
+      <span>api :8000 · ${APP.stats.jobs ?? "–"} roles</span>
+    </div>
+  </div>`;
 }
 
-function renderResumes(resumes) {
-  if (!resumes || !resumes.length) return '<div class="chip">None yet — click “Tailor resume”.</div>';
-  return resumes.map(r => `
-    <div class="resume">
-      <div class="top">
-        <span class="ver">v${r.version}</span>
-        ${r.grounded === 1 ? '<span class="badge good">grounded</span>'
-          : r.grounded === 0 ? '<span class="badge bad">flagged claims</span>' : ''}
-        ${r.approved ? '<span class="badge appr">approved</span>' : ''}
-        <div class="actions">
-          ${r.grounded === 0 ? `<button class="ghost" onclick="showFlags(${r.id}, this)">View flags</button>` : ''}
-          <a class="dl" href="/api/resumes/${r.id}/docx"><button class="ghost">Download .docx</button></a>
-          ${r.approved ? '' : `<button onclick="approve(${r.id})">Approve</button>`}
+const kicker = (t) => `<div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-neutral-700)">${t}</div>`;
+
+function filtered() {
+  const q = APP.query.trim().toLowerCase();
+  if (!q) return APP.jobs;
+  return APP.jobs.filter(j => `${j.company} ${j.title} ${j.track || ""}`.toLowerCase().includes(q));
+}
+
+// Update ONLY the list + count on each keystroke — a full render() would rebuild
+// the whole page and steal focus from the search input after one character.
+function filterList(v) {
+  APP.query = v;
+  const rows = filtered();
+  const list = $("boardlist");
+  if (list) {
+    list.innerHTML = APP.boardView === "board" ? board(rows) : table(rows);
+    if (APP.boardView === "board") wireDrag();
+  }
+  const cnt = $("filtercount");
+  if (cnt) cnt.textContent = `${rows.length} of ${APP.jobs.length}`;
+}
+
+function resumeTag(j) {
+  if (j.any_approved) return `<span class="tag tag-outline">approved</span>`;
+  if (j.resume_count) return `<span class="tag tag-neutral">${j.resume_count} draft${j.resume_count > 1 ? "s" : ""}</span>`;
+  return "";
+}
+
+function viewBoard() {
+  const s = APP.stats;
+  const health = [
+    { label: "Roles", value: s.jobs, note: "in the board" },
+    { label: "Scored", value: s.scored, note: "fit-scored" },
+    { label: "Top fit", value: s.top_fit, note: "best match" },
+    { label: "Drafts", value: s.drafts, note: `${s.roles_with_drafts} roles` },
+    { label: "Approved", value: s.approved, note: "ready to send" },
+  ];
+  const rows = filtered();
+  const strip = `<div style="display:grid;grid-template-columns:repeat(5,1fr);border-bottom:2px solid var(--color-divider)">
+    ${health.map(h => `<div style="padding:14px 20px;border-right:1px solid var(--color-divider)">
+      ${kicker(h.label)}
+      <div style="font-family:var(--font-heading);font-weight:800;font-size:26px;line-height:1.1;margin-top:4px">${h.value ?? "–"}</div>
+      <div style="font-size:11px;color:var(--color-neutral-700)">${h.note}</div>
+    </div>`).join("")}
+  </div>`;
+
+  const toolbar = `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px 12px;padding:12px 20px;border-bottom:1px solid var(--color-divider)">
+    <div class="seg">
+      <label class="seg-opt"><input type="radio" name="bv" ${APP.boardView === "board" ? "checked" : ""} onchange="APP.boardView='board';render()"><span>Board</span></label>
+      <label class="seg-opt"><input type="radio" name="bv" ${APP.boardView === "table" ? "checked" : ""} onchange="APP.boardView='table';render()"><span>Table</span></label>
+    </div>
+    <input class="input" style="flex:1 1 180px;max-width:280px" placeholder="filter company / title / track" value="${esc(APP.query)}" oninput="filterList(this.value)">
+    <span id="filtercount" style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700)">${rows.length} of ${APP.jobs.length}</span>
+    <button class="btn btn-primary" style="margin-left:auto" onclick="go('add')">Add role manually</button>
+  </div>`;
+
+  const ingestRow = `<div style="display:flex;align-items:center;flex-wrap:wrap;gap:10px 12px;padding:10px 20px;border-bottom:1px solid var(--color-divider)">
+    <span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700)">Ingest window</span>
+    <div class="seg">
+      ${[1, 2, 3, 4, 5, 6, 7].map(d => `<label class="seg-opt"><input type="radio" name="iw" ${APP.ingestDays === d ? "checked" : ""} onchange="APP.ingestDays=${d};render()" ${APP.ingesting ? "disabled" : ""}><span>${d}d</span></label>`).join("")}
+    </div>
+    <span style="flex:0 1 auto;font-size:11.5px;color:var(--color-neutral-600)">${APP.ingesting ? "▸ " + esc(APP.ingestMsg) : `Gmail query newer_than:${APP.ingestDays}d · scores only new postings`}</span>
+    <button class="btn btn-secondary" style="margin-left:auto" onclick="runPipeline()" ${APP.ingesting ? "disabled" : ""}>${APP.ingesting ? "Ingesting…" : "Run pipeline"}</button>
+  </div>`;
+
+  return strip + toolbar + ingestRow + `<div id="boardlist">${APP.boardView === "board" ? board(rows) : table(rows)}</div>`;
+}
+
+function board(rows) {
+  const byStatus = Object.fromEntries(STATUSES.map(s => [s, []]));
+  rows.forEach(j => (byStatus[j.status] || byStatus.interested).push(j));
+  return `<div style="display:grid;grid-template-columns:repeat(5,minmax(0,1fr));align-items:start">
+    ${STATUSES.map(st => `<div class="col-drop" data-status="${st}" style="border-right:1px solid var(--color-divider);min-height:70vh;padding-bottom:40px">
+      <div style="display:flex;align-items:baseline;gap:8px;padding:14px 16px 10px;border-bottom:2px solid var(--color-divider);position:sticky;top:57px;background:var(--color-bg);z-index:10">
+        <span style="font-family:var(--font-heading);font-weight:800;font-size:12px;letter-spacing:.12em;text-transform:uppercase">${st}</span>
+        <span style="font-size:12px;color:var(--color-neutral-700);margin-left:auto">${byStatus[st].length}</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:1px;padding:1px 0">
+        ${byStatus[st].map(j => card(j)).join("")}
+      </div>
+    </div>`).join("")}
+  </div>`;
+}
+
+function card(j) {
+  return `<div class="jobcard" draggable="true" data-id="${j.id}" onclick="openJob(${j.id})" style="border-left:3px solid ${scoreColor(j.fit_score)}">
+    <div style="display:flex;align-items:flex-start;gap:10px">
+      <div style="flex:1;min-width:0">
+        <div style="font-family:var(--font-heading);font-weight:800;font-size:14px;line-height:1.2">${esc(j.company)}</div>
+        <div style="font-size:12.5px;color:var(--color-neutral-800);margin-top:2px">${esc(j.title)}</div>
+      </div>
+      <div style="text-align:right;line-height:1">
+        <div style="font-family:var(--font-heading);font-weight:800;font-size:22px;color:${scoreColor(j.fit_score)}">${scoreLabel(j.fit_score)}</div>
+        <div style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-neutral-600)">fit</div>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:10px">
+      ${j.track ? `<span class="tag tag-neutral">${esc(j.track)}</span>` : ""}
+      ${j.location ? `<span class="tag tag-neutral">${esc(j.location)}</span>` : ""}
+      ${resumeTag(j)}
+    </div>
+  </div>`;
+}
+
+function table(rows) {
+  return `<div style="padding:0 20px 60px"><table class="table">
+    <thead><tr><th style="width:34px">#</th><th>Company</th><th>Role</th><th>Track</th><th>Location</th><th style="text-align:right">Fit</th><th>Status</th><th>Resume</th><th></th></tr></thead>
+    <tbody>
+      ${rows.map(j => `<tr style="cursor:pointer" onclick="openJob(${j.id})">
+        <td style="color:var(--color-neutral-600);font-size:12px">${j.id}</td>
+        <td style="font-weight:600">${esc(j.company)}</td>
+        <td>${esc(j.title)}</td>
+        <td style="font-size:12.5px;color:var(--color-neutral-800)">${esc(j.track || "")}</td>
+        <td style="font-size:12.5px;color:var(--color-neutral-800)">${esc(j.location || "")}</td>
+        <td style="text-align:right;font-family:var(--font-heading);font-weight:800;color:${scoreColor(j.fit_score)}">${scoreLabel(j.fit_score)}</td>
+        <td><span class="tag tag-neutral">${esc(j.status)}</span></td>
+        <td>${resumeTag(j) || '<span style="color:var(--color-neutral-500);font-size:12px">—</span>'}</td>
+        <td style="text-align:right"><span style="color:var(--color-accent);font-weight:800">→</span></td>
+      </tr>`).join("")}
+    </tbody>
+  </table></div>`;
+}
+
+function wireDrag() {
+  document.querySelectorAll(".jobcard").forEach(el => {
+    el.addEventListener("dragstart", e => e.dataTransfer.setData("text/plain", el.dataset.id));
+  });
+  document.querySelectorAll(".col-drop").forEach(col => {
+    col.addEventListener("dragover", e => { e.preventDefault(); col.classList.add("over"); });
+    col.addEventListener("dragleave", () => col.classList.remove("over"));
+    col.addEventListener("drop", e => { e.preventDefault(); col.classList.remove("over"); setStatus(+e.dataTransfer.getData("text/plain"), col.dataset.status); });
+  });
+}
+
+// --- job detail -------------------------------------------------------------
+function viewJob() {
+  const j = APP.job;
+  const tags = [j.track, j.location, j.salary].filter(Boolean).map(t => `<span class="tag tag-neutral">${esc(t)}</span>`).join("");
+  const statusSeg = `<div class="seg">${STATUSES.map(s => `<label class="seg-opt"><input type="radio" name="st" ${j.status === s ? "checked" : ""} onchange="setStatus(${j.id},'${s}')"><span>${s}</span></label>`).join("")}</div>`;
+  return `<div>
+    <div style="padding:16px 20px 0"><button class="btn btn-ghost" style="padding-left:0" onclick="go('board')">← Board</button></div>
+    <div style="display:flex;align-items:flex-start;gap:24px;padding:6px 20px 18px;border-bottom:2px solid var(--color-divider)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent)">${esc(j.source)} · job #${j.id}</div>
+        <h2 style="margin:6px 0 2px">${esc(j.title)}</h2>
+        <div style="font-size:16px;color:var(--color-neutral-800)">${esc(j.company)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;align-items:center">
+          ${tags}
+          ${j.url ? `<a class="tag tag-outline" href="${esc(j.url)}" target="_blank" rel="noreferrer">Open posting ↗</a>` : ""}
         </div>
       </div>
-      <div class="flags" id="flags-${r.id}" style="display:none"></div>
-    </div>`).join('');
+      <div style="text-align:right">
+        <div style="font-family:var(--font-heading);font-weight:800;font-size:56px;line-height:1;color:${scoreColor(j.fit_score)}">${scoreLabel(j.fit_score)}</div>
+        <div style="font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-neutral-700)">fit score</div>
+      </div>
+      <div style="width:190px;display:flex;flex-direction:column;gap:8px">
+        <button class="btn btn-primary btn-block" onclick="tailor(${j.id})" ${APP.tailoring ? "disabled" : ""}>${APP.tailoring ? "Tailoring…" : (j.resumes.length ? "Re-tailor resume" : "Tailor resume")}</button>
+        <button class="btn btn-secondary btn-block" onclick="archiveJob(${j.id})">Delete role</button>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid var(--color-divider)">
+      ${kicker("Status")} ${statusSeg}
+      <span style="margin-left:auto;font-size:11px;color:var(--color-neutral-600)">applications.db row ${j.id}</span>
+    </div>
+    <div style="display:grid;grid-template-columns:minmax(0,44fr) minmax(0,56fr);align-items:start">
+      <div style="border-right:1px solid var(--color-divider);padding:20px;min-height:60vh">
+        ${j.fit_rationale ? `${kicker("Fit rationale")}<div style="background:var(--color-surface);padding:14px;font-size:13.5px;line-height:1.6;margin:8px 0 20px">${esc(j.fit_rationale)}</div>` : ""}
+        ${j.missing_keywords && j.missing_keywords.length ? `${kicker("Missing keywords")}<div style="display:flex;flex-wrap:wrap;gap:5px;margin:8px 0 20px">${j.missing_keywords.map(m => `<span class="tag tag-accent">${esc(m)}</span>`).join("")}</div>` : ""}
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">${kicker("Job description")}<span style="font-size:11px;color:var(--color-neutral-600)">alerts carry a teaser — paste the full JD, then Save + Tailor</span></div>
+        <textarea id="jdText" class="input" style="min-height:280px;font-size:13px;line-height:1.6">${esc(j.jd_text)}</textarea>
+        <div style="margin-top:8px"><button class="btn btn-secondary" onclick="saveJd(${j.id})">Save JD</button></div>
+      </div>
+      <div style="padding:20px;min-height:60vh">${resumePane()}</div>
+    </div>
+  </div>`;
 }
 
-async function saveJd(jobId) {
-  const jd = document.getElementById('jdText').value;
-  const res = await fetch(`/api/jobs/${jobId}/jd`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jd_text: jd }),
-  });
-  if (res.ok) { const d = await res.json(); toast(`JD saved (${d.chars} chars).`); }
-  else toast('Save failed.');
-}
-
-async function tailor(jobId) {
-  const btn = $('tailorBtn');
-  btn.disabled = true; btn.textContent = 'Tailoring… (this calls the model, ~20s)';
-  try {
-    const res = await (await fetch(`/api/jobs/${jobId}/tailor`, { method: 'POST' })).json();
-    toast(res.grounded ? `v${res.version} drafted — all claims grounded ✓`
-                       : `v${res.version} drafted — ${res.flagged.length} flagged claim(s)`);
-    openJob(jobId);
-  } catch (e) {
-    toast('Tailoring failed — check the server console.');
-    btn.disabled = false; btn.textContent = '✨ Tailor resume';
+function resumePane() {
+  const j = APP.job;
+  if (APP.tailoring) {
+    return `<div style="border:2px solid var(--color-divider);padding:24px;background:var(--color-surface)">
+      <div id="tailorStage" style="font-family:var(--font-heading);font-weight:800;font-size:16px;animation:pulse 1.2s infinite">${esc(APP.tailorStage)}</div>
+      <div style="height:6px;background:var(--color-neutral-300);margin-top:14px;overflow:hidden"><div style="height:6px;background:var(--color-accent);width:40%;animation:pulse 1.2s infinite"></div></div>
+      <div style="font-size:11.5px;color:var(--color-neutral-700);margin-top:8px">POST /api/jobs/${j.id}/tailor — two quality-tier calls (draft + grounding), then docx render.</div>
+    </div>`;
   }
+  if (!j.resumes.length) {
+    return `<div style="border:2px dashed var(--color-divider);padding:36px 24px">
+      <div style="font-family:var(--font-heading);font-weight:800;font-size:18px">No draft for this role.</div>
+      <div style="font-size:13px;color:var(--color-neutral-700);margin-top:6px;max-width:44ch">Tailoring pulls from data/fact_bank.md, drafts against this JD, then runs the grounding check. About 20 seconds.</div>
+      <button class="btn btn-primary" style="margin-top:14px" onclick="tailor(${j.id})">Tailor resume</button>
+    </div>`;
+  }
+  const r = APP.resume;
+  const tabs = j.resumes.map(v => `<button class="btn" style="font-size:12px;padding:5px 12px;border:1px solid var(--color-divider);${v.id === r.id ? "background:var(--color-accent);color:var(--color-bg)" : "background:var(--color-surface)"}" onclick="selectResume(${v.id})">v${v.version}</button>`).join("");
+  const groundTag = r.grounded === 1 ? `<span class="tag tag-neutral">grounded</span>` : r.grounded === 0 ? `<span class="tag tag-accent">flagged</span>` : "";
+  const apprTag = r.approved ? `<span class="tag tag-outline">approved</span>` : "";
+  const flags = (r.grounding && r.grounding.claims || []).filter(c => !c.supported);
+  return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+      ${kicker("Tailored resume")}<div style="display:flex;gap:1px;margin-left:auto">${tabs}</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--color-surface);border-bottom:2px solid var(--color-divider)">
+      <span style="font-family:var(--font-heading);font-weight:800;font-size:14px">v${r.version}</span>
+      ${groundTag} ${apprTag}
+      <span style="font-size:11px;color:var(--color-neutral-600)">${esc(r.created_at || "")}</span>
+      <div style="margin-left:auto;display:flex;gap:6px">
+        <button class="btn btn-secondary" onclick="download(${r.id})">Download .docx</button>
+        <button class="btn btn-primary" onclick="approve(${r.id})" ${r.approved ? "disabled" : ""}>Approve</button>
+      </div>
+    </div>
+    <div class="seg" style="margin:12px 0">
+      <label class="seg-opt"><input type="radio" name="rt" ${APP.rtab === "preview" ? "checked" : ""} onchange="APP.rtab='preview';render()"><span>Preview</span></label>
+      <label class="seg-opt"><input type="radio" name="rt" ${APP.rtab === "grounding" ? "checked" : ""} onchange="APP.rtab='grounding';render()"><span>Grounding (${flags.length} flagged)</span></label>
+    </div>
+    ${APP.rtab === "preview" ? resumePreview(r.draft) : grounding(r)}`;
 }
 
-async function approve(resumeId) {
-  await fetch(`/api/resumes/${resumeId}/approve`, { method: 'POST' });
-  toast('Approved.');
-  openJob(activeId);
+function resumePreview(d) {
+  if (!d) return `<div class="text-muted" style="padding:20px">Draft file unavailable.</div>`;
+  const secHead = (t) => `<div style="font-family:var(--font-heading);font-weight:800;font-size:11px;letter-spacing:.14em;text-transform:uppercase;margin:18px 0 8px;border-bottom:1px solid var(--color-divider);padding-bottom:4px">${t}</div>`;
+  return `<div style="background:var(--color-neutral-100);border:1px solid var(--color-divider);padding:30px 34px;box-shadow:var(--shadow-sm)">
+    <div style="font-family:var(--font-heading);font-weight:800;font-size:26px;letter-spacing:-.02em">TREVOR SITHISAKD</div>
+    <div style="font-size:12.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-accent-700);margin-top:2px">${esc(d.tagline)}</div>
+    <div style="height:2px;background:var(--color-divider);margin:14px 0"></div>
+    <div style="font-size:12.5px;line-height:1.6">${esc(d.profile)}</div>
+    ${secHead("Projects")}
+    ${(d.projects || []).map(p => `<div style="margin-bottom:12px">
+      <div style="display:flex;gap:8px;align-items:baseline">
+        <span style="font-weight:600;font-size:13px">${esc(p.title)}</span>
+        <span style="font-size:12.5px;color:var(--color-accent-700)">— ${esc(p.angle)}</span>
+        <span style="margin-left:auto;font-size:11.5px;color:var(--color-neutral-700)">${esc(p.year)}</span>
+      </div>
+      <div style="font-style:italic;font-size:11.5px;color:var(--color-neutral-700)">${esc(p.stack)} · ${esc(p.url)}</div>
+      <ul style="margin:5px 0 0;padding-left:16px">${(p.bullets || []).map(b => `<li style="font-size:12.5px;line-height:1.55;margin-bottom:2px">${esc(b)}</li>`).join("")}</ul>
+    </div>`).join("")}
+    ${secHead("Skills")}
+    ${(d.skills || []).map(s => `<div style="display:grid;grid-template-columns:170px 1fr;gap:10px;font-size:12.5px;margin-bottom:3px"><span style="font-weight:600">${esc(s.label)}</span><span>${esc(s.content)}</span></div>`).join("")}
+    ${secHead("Education")}<div style="font-size:12.5px;line-height:1.55">${esc(d.education)}</div>
+    ${(d.experience || []).length ? secHead("Experience") : ""}
+    ${(d.experience || []).map(e => `<div style="margin-bottom:10px">
+      <div style="display:flex;gap:8px;align-items:baseline"><span style="font-weight:600;font-size:13px">${esc(e.role)}</span><span style="font-size:12.5px;color:var(--color-neutral-700)">${esc(e.org)}</span><span style="margin-left:auto;font-size:11.5px;color:var(--color-neutral-700)">${esc(e.dates)}</span></div>
+      <ul style="margin:4px 0 0;padding-left:16px">${(e.bullets || []).map(b => `<li style="font-size:12.5px;line-height:1.55">${esc(b)}</li>`).join("")}</ul>
+    </div>`).join("")}
+  </div>`;
 }
 
-async function showFlags(resumeId, btn) {
-  const el = $(`flags-${resumeId}`);
-  if (el.style.display === 'block') { el.style.display = 'none'; return; }
-  const r = await (await fetch(`/api/resumes/${resumeId}`)).json();
-  const flagged = (r.grounding?.claims || []).filter(c => !c.supported);
-  el.innerHTML = flagged.length
-    ? flagged.map(c => `<div class="f">⚠ ${esc(c.claim)}</div>`).join('')
-    : '<div class="chip">No unsupported claims.</div>';
-  el.style.display = 'block';
+function grounding(r) {
+  const claims = (r.grounding && r.grounding.claims) || [];
+  if (!claims.length) return `<div class="text-muted" style="padding:20px">No grounding report for this version.</div>`;
+  const ok = claims.filter(c => c.supported).length;
+  const stat = [{ l: "Claims", v: claims.length, c: "var(--color-text)" }, { l: "Supported", v: ok, c: "var(--color-neutral-900)" }, { l: "Flagged", v: claims.length - ok, c: (claims.length - ok) ? "var(--color-accent)" : "var(--color-neutral-900)" }];
+  return `<div style="display:grid;grid-template-columns:repeat(3,1fr);border:1px solid var(--color-divider);margin-bottom:14px">
+      ${stat.map(g => `<div style="padding:10px 14px;border-right:1px solid var(--color-divider)">${kicker(g.l)}<div style="font-family:var(--font-heading);font-weight:800;font-size:22px;color:${g.c}">${g.v}</div></div>`).join("")}
+    </div>
+    <div style="font-size:12px;color:var(--color-neutral-700);margin-bottom:10px">Every claim is checked against data/fact_bank.md. An unsupported claim blocks the approve gate until you edit or accept it.</div>
+    <div style="display:flex;flex-direction:column;gap:1px">
+      ${claims.map(c => { const edge = c.supported ? "var(--color-neutral-400)" : "var(--color-accent)"; return `<div style="background:var(--color-surface);padding:12px 14px;border-left:3px solid ${edge}">
+        <div style="display:flex;gap:10px;align-items:flex-start">
+          <span style="font-family:var(--font-heading);font-weight:800;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:${edge};min-width:96px">${c.supported ? "Supported" : "Unsupported"}</span>
+          <span style="font-size:12.5px;line-height:1.55;flex:1">${esc(c.claim)}</span>
+        </div>
+        ${c.evidence ? `<div style="display:flex;gap:10px;margin-top:6px;padding-left:106px"><span style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-600)">evidence</span><span style="font-size:12px;color:var(--color-neutral-800);font-style:italic">${esc(c.evidence)}</span></div>` : ""}
+      </div>`; }).join("")}
+    </div>`;
 }
 
-loadJobs();
+// --- add role ---------------------------------------------------------------
+function viewAdd() {
+  const F = [
+    { k: "company", label: "Company", span: 1, ph: "Atlassian" },
+    { k: "title", label: "Role title", span: 1, ph: "Machine Learning Engineer" },
+    { k: "url", label: "Posting URL", span: 1, ph: "https://…" },
+    { k: "location", label: "Location", span: 1, ph: "Sydney, hybrid" },
+    { k: "salary", label: "Salary", span: 1, ph: "$110k–125k" },
+    { k: "deadline", label: "Deadline (YYYY-MM-DD)", span: 1, ph: "2026-08-12" },
+  ];
+  return `<div style="max-width:1100px;padding:26px 20px 80px">
+    <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent)">Manual entry</div>
+    <h2 style="margin:6px 0 4px">Track a role found outside the pipeline</h2>
+    <div style="font-size:13.5px;color:var(--color-neutral-800);max-width:70ch">Paste a posting you found on a careers page or referral. It skips ingest + extract, lands in the jobs table with source = manual, and gets fit-scored like everything else.</div>
+    <hr class="hr">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px 24px">
+      ${F.map(f => `<div class="field"><label>${f.label}</label><input id="f_${f.k}" class="input" placeholder="${f.ph}"></div>`).join("")}
+      <div class="field" style="grid-column:span 2"><label>Job description — pasted verbatim</label>
+        <textarea id="f_jd" class="input" style="min-height:220px;font-size:13px;line-height:1.55" placeholder="Paste the full posting. The fit-score and tailor stages read this text directly."></textarea>
+      </div>
+    </div>
+    <hr class="hr">
+    <div style="display:flex;align-items:center;gap:12px">
+      <button class="btn btn-primary" onclick="saveNewJob()">Save & fit-score</button>
+      <button class="btn btn-secondary" onclick="go('board')">Cancel</button>
+      <span style="font-size:12px;color:var(--color-neutral-700);margin-left:auto">source = manual · one fit-score LLM call</span>
+    </div>
+  </div>`;
+}
+
+loadBoard();
 </script>
 </body>
 </html>

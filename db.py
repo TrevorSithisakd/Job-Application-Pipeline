@@ -4,6 +4,7 @@ LEARN: SQL basics, schema design, foreign keys, the sqlite3 module,
        idempotency (why upsert on email_id stops duplicate rows on re-runs).
 """
 from __future__ import annotations
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -17,14 +18,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     dedup_key TEXT UNIQUE,         -- idempotency: normalized "company|title"
     source TEXT, company TEXT, title TEXT, jd_text TEXT,
     location TEXT, salary TEXT, deadline TEXT, url TEXT,
-    fit_score INTEGER, fit_rationale TEXT, track TEXT,
+    fit_score INTEGER, fit_rationale TEXT, track TEXT, missing_keywords TEXT,
+    status TEXT DEFAULT 'interested',   -- application pipeline column (the board)
     ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS applications (
-    id INTEGER PRIMARY KEY,
-    job_id INTEGER REFERENCES jobs(id),
-    status TEXT DEFAULT 'interested',   -- interested|applied|interviewing|rejected|offer
-    applied_date TEXT, resume_id INTEGER, notes TEXT
 );
 CREATE TABLE IF NOT EXISTS resumes (
     id INTEGER PRIMARY KEY,
@@ -81,6 +77,13 @@ def _migrate(c: sqlite3.Connection) -> None:
             FROM jobs_old;
             DROP TABLE jobs_old;
         """)
+
+    # jobs: additive columns for the application board + fit-score keywords.
+    jcols2 = {row[1] for row in c.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "missing_keywords" not in jcols2:
+        c.execute("ALTER TABLE jobs ADD COLUMN missing_keywords TEXT")
+    if "status" not in jcols2:
+        c.execute("ALTER TABLE jobs ADD COLUMN status TEXT DEFAULT 'interested'")
 
 
 def _dedup_key(job: Job) -> str:
@@ -140,9 +143,30 @@ def set_fit(job_id: int, fit: FitScore) -> None:
     """Write the fit-score results onto an existing job row."""
     with sqlite3.connect(DB_PATH) as c:
         c.execute(
-            "UPDATE jobs SET fit_score = ?, fit_rationale = ?, track = ? WHERE id = ?",
-            (fit.score, fit.rationale, fit.track, job_id),
+            "UPDATE jobs SET fit_score = ?, fit_rationale = ?, track = ?, "
+            "missing_keywords = ? WHERE id = ?",
+            (fit.score, fit.rationale, fit.track,
+             json.dumps(fit.missing_keywords), job_id),
         )
+
+
+def set_status(job_id: int, status: str) -> None:
+    """Move a job along the application board (interested/applied/…)."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("UPDATE jobs SET status = ? WHERE id = ?", (status, job_id))
+
+
+def stats() -> dict:
+    """Aggregate counts for the board's health strip."""
+    with sqlite3.connect(DB_PATH) as c:
+        j = c.execute(
+            "SELECT COUNT(*), COUNT(fit_score), MAX(fit_score) FROM jobs"
+        ).fetchone()
+        r = c.execute(
+            "SELECT COUNT(*), COUNT(DISTINCT job_id), COALESCE(SUM(approved),0) FROM resumes"
+        ).fetchone()
+        return {"jobs": j[0], "scored": j[1] or 0, "top_fit": j[2] or 0,
+                "drafts": r[0] or 0, "roles_with_drafts": r[1] or 0, "approved": r[2]}
 
 
 def all_jobs() -> list[dict]:
@@ -150,7 +174,11 @@ def all_jobs() -> list[dict]:
     with sqlite3.connect(DB_PATH) as c:
         c.row_factory = sqlite3.Row  # rows behave like dicts instead of tuples
         rows = c.execute(
-            "SELECT * FROM jobs ORDER BY fit_score IS NULL, fit_score DESC"
+            "SELECT j.*, "
+            "(SELECT COUNT(*) FROM resumes r WHERE r.job_id = j.id) AS resume_count, "
+            "(SELECT COALESCE(MAX(approved), 0) FROM resumes r WHERE r.job_id = j.id) "
+            "  AS any_approved "
+            "FROM jobs j ORDER BY fit_score IS NULL, fit_score DESC"
         ).fetchall()
         return [dict(r) for r in rows]
 
@@ -251,6 +279,17 @@ def set_approved(resume_id: int, approved: bool = True) -> None:
     with sqlite3.connect(DB_PATH) as c:
         c.execute("UPDATE resumes SET approved = ? WHERE id = ?",
                   (1 if approved else 0, resume_id))
+
+
+def delete_job(job_id: int) -> None:
+    """Delete a job, its resume rows, and its rendered resume files on disk."""
+    import shutil
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("DELETE FROM resumes WHERE job_id = ?", (job_id,))
+        c.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    folder = RESUMES_DIR / str(job_id)
+    if folder.exists():
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def set_jd_text(job_id: int, jd_text: str) -> None:

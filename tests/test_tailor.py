@@ -110,11 +110,10 @@ def test_tailor_job_persists_and_flags_unsupported(temp_db, fake_llm):
     _cfg, calls = fake_llm
     result = tailor.tailor_job(temp_db)
 
-    # Phase A: a v1 draft is persisted with its preview and the grounding report.
+    # Phase A: a v1 draft is persisted with the grounding report.
     assert result.version == 1
     json_path = Path(result.json_path)
     assert json_path.exists() and json_path.name == "v1.json"
-    assert Path(result.md_path).exists()
     assert (json_path.parent / "v1.grounding.json").exists()
     # the deterministic renderer ran and produced the docx deliverable
     assert Path(result.docx_path).exists() and result.docx_path.endswith("v1.docx")
