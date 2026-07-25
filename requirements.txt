@@ -2,9 +2,12 @@
 pydantic>=2
 openai>=1.0          # used as the client for DeepSeek's OpenAI-compatible API
 python-dotenv        # loads secrets from .env so keys stay out of the shell env
-streamlit
 google-api-python-client
 google-auth-oauthlib
+
+# Local web app (replaces the Streamlit dashboard)
+fastapi
+uvicorn
 
 # Dev/test only — not needed to run the pipeline.
 pytest>=8

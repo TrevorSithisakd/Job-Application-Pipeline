@@ -4,6 +4,7 @@ LEARN: SQL basics, schema design, foreign keys, the sqlite3 module,
        idempotency (why upsert on email_id stops duplicate rows on re-runs).
 """
 from __future__ import annotations
+import re
 import sqlite3
 from pathlib import Path
 from paths import DB_PATH, RESUMES_DIR
@@ -12,7 +13,8 @@ from schemas import Job, FitScore, ResumeDraft, GroundingResult
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY,
-    email_id TEXT UNIQUE,          -- idempotency key (Gmail message id)
+    email_id TEXT,                 -- provenance: the alert email it came from
+    dedup_key TEXT UNIQUE,         -- idempotency: normalized "company|title"
     source TEXT, company TEXT, title TEXT, jd_text TEXT,
     location TEXT, salary TEXT, deadline TEXT, url TEXT,
     fit_score INTEGER, fit_rationale TEXT, track TEXT,
@@ -42,38 +44,82 @@ def init() -> None:
 
 
 def _migrate(c: sqlite3.Connection) -> None:
-    """Add columns to a resumes table created before grounding existed. SQLite
-    has no 'ADD COLUMN IF NOT EXISTS', so check PRAGMA first — this keeps init()
-    idempotent for DBs that predate Phase B."""
+    """Bring an older DB up to the current schema. SQLite has no 'ADD COLUMN IF
+    NOT EXISTS', so we check PRAGMA first — this keeps init() idempotent."""
+    # resumes: grounding columns (Phase B).
     cols = {row[1] for row in c.execute("PRAGMA table_info(resumes)").fetchall()}
     if "grounded" not in cols:
         c.execute("ALTER TABLE resumes ADD COLUMN grounded INTEGER")
     if "grounding_json" not in cols:
         c.execute("ALTER TABLE resumes ADD COLUMN grounding_json TEXT")
 
+    # jobs: move idempotency from a UNIQUE email_id to a per-job dedup_key, so a
+    # single digest email can hold many jobs. Changing a column constraint means
+    # rebuilding the table in SQLite. Ids are preserved so resumes.job_id stays
+    # valid; INSERT OR IGNORE drops any (rare) duplicate url from the old data.
+    jcols = {row[1] for row in c.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "dedup_key" not in jcols:
+        c.executescript("""
+            ALTER TABLE jobs RENAME TO jobs_old;
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY,
+                email_id TEXT,
+                dedup_key TEXT UNIQUE,
+                source TEXT, company TEXT, title TEXT, jd_text TEXT,
+                location TEXT, salary TEXT, deadline TEXT, url TEXT,
+                fit_score INTEGER, fit_rationale TEXT, track TEXT,
+                ingested_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT OR IGNORE INTO jobs
+                (id, email_id, dedup_key, source, company, title, jd_text,
+                 location, salary, deadline, url, fit_score, fit_rationale,
+                 track, ingested_at)
+            SELECT id, email_id,
+                   COALESCE(NULLIF(url, ''), email_id || ':' || id),
+                   source, company, title, jd_text, location, salary, deadline,
+                   url, fit_score, fit_rationale, track, ingested_at
+            FROM jobs_old;
+            DROP TABLE jobs_old;
+        """)
+
+
+def _dedup_key(job: Job) -> str:
+    """Identity of a posting for dedup. NOT the url: the same job appears on
+    LinkedIn/Indeed/SEEK with different urls, and urls carry per-email tracking
+    tokens — so url-based dedup leaves the same role duplicated many times.
+    Normalized company+title collapses those to one row. Normalization lowercases
+    and squeezes all whitespace runs to a single space so "Data  Scientist" and
+    "Data Scientist" match."""
+    norm = lambda s: re.sub(r"\s+", " ", s).strip().lower()
+    return f"{norm(job.company)}|{norm(job.title)}"
+
 
 def upsert_job(email_id: str, job: Job) -> int:
-    """Insert a job, or update it if this email_id was already ingested.
+    """Insert a job, or update it if this posting was already ingested.
 
-    Idempotent: re-running the pipeline over the same inbox never creates
-    duplicate rows. The ON CONFLICT clause fires because email_id is UNIQUE.
-    Returns the row's id (needed by set_fit and the resume stage).
+    Idempotent per POSTING, not per email: a digest email holds many jobs, and the
+    same job recurs across boards/emails. The dedup key is normalized company+title
+    (see _dedup_key), so re-running never creates duplicate rows. Returns the row's
+    id (needed by set_fit and the resume stage).
     """
+    dedup_key = _dedup_key(job)
     with sqlite3.connect(DB_PATH) as c:
         c.execute(
             """
-            INSERT INTO jobs (email_id, source, company, title, jd_text,
+            INSERT INTO jobs (email_id, dedup_key, source, company, title, jd_text,
                               location, salary, deadline, url)
-            VALUES (:email_id, :source, :company, :title, :jd_text,
+            VALUES (:email_id, :dedup_key, :source, :company, :title, :jd_text,
                     :location, :salary, :deadline, :url)
-            ON CONFLICT(email_id) DO UPDATE SET
-                source=excluded.source, company=excluded.company,
-                title=excluded.title, jd_text=excluded.jd_text,
-                location=excluded.location, salary=excluded.salary,
-                deadline=excluded.deadline, url=excluded.url
+            ON CONFLICT(dedup_key) DO UPDATE SET
+                email_id=excluded.email_id, source=excluded.source,
+                company=excluded.company, title=excluded.title,
+                jd_text=excluded.jd_text, location=excluded.location,
+                salary=excluded.salary, deadline=excluded.deadline,
+                url=excluded.url
             """,
             {
                 "email_id": email_id,
+                "dedup_key": dedup_key,
                 "source": job.source,
                 "company": job.company,
                 "title": job.title,
@@ -86,7 +132,7 @@ def upsert_job(email_id: str, job: Job) -> int:
             },
         )
         # lastrowid is unreliable on the UPDATE path, so look the id up by key.
-        row = c.execute("SELECT id FROM jobs WHERE email_id = ?", (email_id,)).fetchone()
+        row = c.execute("SELECT id FROM jobs WHERE dedup_key = ?", (dedup_key,)).fetchone()
         return row[0]
 
 
@@ -168,3 +214,47 @@ def save_resume(job_id: int, draft: ResumeDraft,
             (job_id, version, str(json_path), grounded, grounding_json),
         )
         return cur.lastrowid, version, json_path
+
+
+# --- Read/write helpers for the web API -------------------------------------
+
+def get_job_row(job_id: int) -> dict | None:
+    """The full job row as a dict (all columns, incl. fit score + JD), or None."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def resumes_for_job(job_id: int) -> list[dict]:
+    """Every resume version for a job, newest first (no heavy grounding_json)."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT id, job_id, version, file_path, approved, grounded, created_at "
+            "FROM resumes WHERE job_id = ? ORDER BY version DESC",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_resume(resume_id: int) -> dict | None:
+    """One resume row (all columns, incl. grounding_json), or None."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT * FROM resumes WHERE id = ?", (resume_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def set_approved(resume_id: int, approved: bool = True) -> None:
+    """Flip a resume's approval flag — the human gate, driven from the UI."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("UPDATE resumes SET approved = ? WHERE id = ?",
+                  (1 if approved else 0, resume_id))
+
+
+def set_jd_text(job_id: int, jd_text: str) -> None:
+    """Replace a job's description. Alert emails only carry a teaser, so the user
+    pastes the full JD from the posting before tailoring; this stores it."""
+    with sqlite3.connect(DB_PATH) as c:
+        c.execute("UPDATE jobs SET jd_text = ? WHERE id = ?", (jd_text, job_id))

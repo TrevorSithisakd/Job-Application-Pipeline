@@ -14,24 +14,37 @@ def run() -> None:
 
     scored = skipped = 0
     for email_id, body in emails:
-        # Isolate each email. Job alerts sit alongside application-status mail
-        # that isn't a posting at all, so extraction failing is expected traffic,
-        # not a crash — one bad email must not discard the whole run.
+        # One email is often a DIGEST of many jobs, so extraction returns a list.
+        # Isolate each email: application-status mail and newsletters extract to
+        # [] (or raise), which is expected traffic, not a crash — one bad email
+        # must not discard the whole run.
         try:
-            job = extract.extract(body)             # stage 2 (validated)
-            job_id = db.upsert_job(email_id, job)   # store (idempotent)
-            fit = fitscore.fit_score(job)           # stage 3
-            db.set_fit(job_id, fit)                 # store
-            scored += 1
-            print(f"  [{fit.score:>3}] {job.company} - {job.title}")
+            jobs = extract.extract(body)            # stage 2 -> list[Job]
         except Exception as e:
             skipped += 1
-            print(f"  [skip] {email_id}: {type(e).__name__}: {e}")
+            print(f"  [skip email] {email_id}: {type(e).__name__}: {e}")
+            continue
+        if not jobs:
+            print(f"  [no jobs] {email_id}")        # not a posting email
+            continue
+
+        # Then score each job independently: one bad posting must not sink the
+        # other eleven in the same digest.
+        for job in jobs:
+            try:
+                job_id = db.upsert_job(email_id, job)   # store (idempotent per posting)
+                fit = fitscore.fit_score(job)           # stage 3
+                db.set_fit(job_id, fit)                 # store
+                scored += 1
+                print(f"  [{fit.score:>3}] {job.company} - {job.title}")
+            except Exception as e:
+                skipped += 1
+                print(f"  [skip job] {job.company} - {job.title}: {type(e).__name__}: {e}")
         # Resume stage is opt-in per job (it costs the quality model):
-        # draft = tailor.draft_resume(job); save as pending for approval.
+        # tailor.tailor_job(job_id) drafts, grounds, and renders a pending resume.
 
     print(f"\nRun complete. {scored} scored, {skipped} skipped.")
-    print("Open the dashboard: streamlit run dashboard.py")
+    print("Open the app: run_app.bat   (or: python run_app.py)")
 
 
 if __name__ == "__main__":

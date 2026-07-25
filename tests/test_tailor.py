@@ -80,6 +80,9 @@ def temp_db(tmp_path, monkeypatch):
     one job. Yields its job_id. Nothing touches the real applications.db."""
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
     monkeypatch.setattr(db, "RESUMES_DIR", tmp_path / "resumes")
+    # render.py binds its own RESUMES_DIR at import, so patch it too or the docx
+    # would be written into the real data/resumes during tests.
+    monkeypatch.setattr("stages.render.RESUMES_DIR", tmp_path / "resumes")
     db.init()
     job_id = db.upsert_job("email-1", Job(
         source="seek-alert", company="ACME", title="Data Scientist",
@@ -113,6 +116,8 @@ def test_tailor_job_persists_and_flags_unsupported(temp_db, fake_llm):
     assert json_path.exists() and json_path.name == "v1.json"
     assert Path(result.md_path).exists()
     assert (json_path.parent / "v1.grounding.json").exists()
+    # the deterministic renderer ran and produced the docx deliverable
+    assert Path(result.docx_path).exists() and result.docx_path.endswith("v1.docx")
 
     # Phase B: the invented claim is flagged; the real ones pass.
     assert result.grounding.all_supported is False

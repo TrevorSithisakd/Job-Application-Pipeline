@@ -24,6 +24,13 @@ class Job(BaseModel):
     url: Optional[str] = None
 
 
+class JobList(BaseModel):
+    """The EXTRACT stage's output. A single alert email is often a DIGEST listing
+    many jobs (SEEK recommendations, LinkedIn round-ups), so extraction returns a
+    list, not one job. A non-posting email (status update, newsletter) yields []."""
+    jobs: list[Job] = []
+
+
 class FitScore(BaseModel):
     """Produced by the FIT-SCORE stage. score is constrained 0-100."""
     score: int = Field(ge=0, le=100)

@@ -11,6 +11,7 @@ from html import unescape
 
 from collections import Counter
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -58,9 +59,16 @@ def _gmail_service():
     creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
   # If there are no (valid) credentials available, let the user log in.
   if not creds or not creds.valid:
+    # Try a silent refresh first. Google expires refresh tokens after ~7 days
+    # for apps still in "testing", so a revoked token is expected, not
+    # exceptional — catch it and fall through to a fresh login instead of
+    # crashing (which is what forced the manual token.json delete).
     if creds and creds.expired and creds.refresh_token:
-      creds.refresh(Request())
-    else:
+      try:
+        creds.refresh(Request())
+      except RefreshError:
+        creds = None
+    if not creds or not creds.valid:
       flow = InstalledAppFlow.from_client_secrets_file(
           str(CREDENTIALS_FILE), SCOPES
       )
