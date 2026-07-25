@@ -25,6 +25,7 @@ from paths import FACT_BANK_FILE
 from schemas import (Job, ResumeDraft, GroundingReport, GroundingResult,
                      GroundedClaim)
 from llm import call_structured
+from stages.render import render
 
 
 def _load_fact_bank() -> str:
@@ -91,6 +92,7 @@ class TailorResult:
     grounding: GroundingResult
     json_path: str
     md_path: str
+    docx_path: str
 
 
 def draft_structured(job: Job) -> ResumeDraft:
@@ -200,10 +202,11 @@ def tailor_job(job_id: int) -> TailorResult:
     resume_id, version, json_path = db.save_resume(job_id, draft, grounding=grounding)
     md_path = json_path.with_suffix(".md")
     md_path.write_text(_render_markdown(draft), encoding="utf-8")
+    docx_path = render(draft, job_id, version)   # deterministic: draft -> .docx deliverable
     return TailorResult(
         job_id=job_id, resume_id=resume_id, version=version,
         draft=draft, grounding=grounding,
-        json_path=str(json_path), md_path=str(md_path),
+        json_path=str(json_path), md_path=str(md_path), docx_path=str(docx_path),
     )
 
 
@@ -223,7 +226,9 @@ if __name__ == "__main__":
     _result = tailor_job(_jid)
     _g = _result.grounding
     _ok = len(_g.claims) - len(_g.flagged)
-    print(f"Drafted resume v{_result.version} (pending) -> {_result.md_path}")
+    print(f"Drafted resume v{_result.version} (pending)")
+    print(f"  preview: {_result.md_path}")
+    print(f"  docx:    {_result.docx_path}")
     print(f"Grounding: {_ok}/{len(_g.claims)} claims supported.")
     for _c in _g.flagged:
         print(f"  [FLAG] {_c.claim}")
