@@ -13,7 +13,7 @@ import threading
 from datetime import date
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -203,16 +203,37 @@ def approve(resume_id: int) -> dict:
     return {"ok": True}
 
 
+_MEDIA = {".docx": DOCX_MEDIA, ".pdf": "application/pdf"}
+
+
 @app.get("/api/resumes/{resume_id}/docx")
-def download_docx(resume_id: int) -> FileResponse:
-    """Download the rendered .docx (sibling of the stored JSON)."""
+def download_resume(resume_id: int) -> FileResponse:
+    """Download a resume. Tailored versions store a .json whose sibling .docx we
+    serve; uploaded versions store the file itself (.docx or .pdf)."""
     row = db.get_resume(resume_id)
     if row is None:
         raise HTTPException(404, "resume not found")
-    docx = Path(row["file_path"]).with_suffix(".docx")
-    if not docx.exists():
-        raise HTTPException(404, "docx not rendered for this version")
-    return FileResponse(docx, filename=docx.name, media_type=DOCX_MEDIA)
+    fp = Path(row["file_path"])
+    serve = fp.with_suffix(".docx") if fp.suffix == ".json" else fp
+    if not serve.exists():
+        raise HTTPException(404, "resume file not found")
+    return FileResponse(serve, filename=serve.name,
+                        media_type=_MEDIA.get(serve.suffix.lower(), "application/octet-stream"))
+
+
+@app.post("/api/jobs/{job_id}/resume/upload")
+async def upload_resume(job_id: int, file: UploadFile = File(...)) -> dict:
+    """Attach an existing (non-tailored) resume file to a job as a new version."""
+    if db.get_job_row(job_id) is None:
+        raise HTTPException(404, "job not found")
+    ext = Path(file.filename or "resume.docx").suffix.lower()
+    if ext not in (".docx", ".pdf"):
+        raise HTTPException(400, "upload a .docx or .pdf file")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "empty file")
+    resume_id, version = db.save_uploaded_resume(job_id, data, ext)
+    return {"resume_id": resume_id, "version": version, "source": "uploaded"}
 
 
 # Serve the frontend LAST so it doesn't shadow the /api routes above. html=True

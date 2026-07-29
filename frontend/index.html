@@ -7,8 +7,11 @@
 <link rel="stylesheet" href="/styles.css">
 <style>
   @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
-  .jobcard { background: var(--color-surface); padding: 12px 16px 14px; cursor: pointer; }
+  .jobcard { background: var(--color-surface); padding: 12px 16px 14px; cursor: pointer; position: relative; }
   .jobcard:hover { box-shadow: var(--shadow-md); }
+  .qdel { border: none; background: transparent; color: var(--color-neutral-500); cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 6px; opacity: 0; transition: opacity .1s; }
+  .jobcard:hover .qdel, .table tbody tr:hover .qdel { opacity: 1; }
+  .qdel:hover { color: var(--color-accent); }
   .col-drop { transition: background .12s; }
   .col-drop.over { background: color-mix(in srgb, var(--color-accent) 8%, transparent); }
   .toast { position: fixed; bottom: 20px; right: 20px; background: var(--color-text); color: var(--color-bg); padding: 12px 18px; font-size: 13px; box-shadow: var(--shadow-lg); z-index: 50; opacity: 0; transition: opacity .2s; pointer-events: none; }
@@ -105,6 +108,28 @@ async function archiveJob(id) {
   if (!confirm("Delete this role and any drafted resumes? This can't be undone.")) return;
   await api(`/api/jobs/${id}`, { method: "DELETE" });
   toast("Role deleted."); go("board");
+}
+
+async function quickDelete(id) {
+  if (!confirm("Delete this role and any resumes attached to it?")) return;
+  await api(`/api/jobs/${id}`, { method: "DELETE" });
+  toast("Role deleted."); await loadBoard();
+}
+
+function pickUpload(jobId) {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = ".docx,.pdf";
+  inp.onchange = async () => {
+    if (!inp.files.length) return;
+    const fd = new FormData(); fd.append("file", inp.files[0]);
+    toast("Uploading…");
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/resume/upload`, { method: "POST", body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      toast("Resume uploaded."); await openJob(jobId);
+    } catch (e) { toast("Upload failed — use a .docx or .pdf."); }
+  };
+  inp.click();
 }
 
 // --- render -----------------------------------------------------------------
@@ -225,10 +250,13 @@ function card(j) {
         <div style="font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-neutral-600)">fit</div>
       </div>
     </div>
-    <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:10px">
-      ${j.track ? `<span class="tag tag-neutral">${esc(j.track)}</span>` : ""}
-      ${j.location ? `<span class="tag tag-neutral">${esc(j.location)}</span>` : ""}
-      ${resumeTag(j)}
+    <div style="display:flex;align-items:center;gap:4px;margin-top:10px">
+      <div style="display:flex;flex-wrap:wrap;gap:4px;flex:1;min-width:0">
+        ${j.track ? `<span class="tag tag-neutral">${esc(j.track)}</span>` : ""}
+        ${j.location ? `<span class="tag tag-neutral">${esc(j.location)}</span>` : ""}
+        ${resumeTag(j)}
+      </div>
+      <button class="qdel" title="Delete role" onclick="event.stopPropagation();quickDelete(${j.id})">✕</button>
     </div>
   </div>`;
 }
@@ -246,7 +274,7 @@ function table(rows) {
         <td style="text-align:right;font-family:var(--font-heading);font-weight:800;color:${scoreColor(j.fit_score)}">${scoreLabel(j.fit_score)}</td>
         <td><span class="tag tag-neutral">${esc(j.status)}</span></td>
         <td>${resumeTag(j) || '<span style="color:var(--color-neutral-500);font-size:12px">—</span>'}</td>
-        <td style="text-align:right"><span style="color:var(--color-accent);font-weight:800">→</span></td>
+        <td style="text-align:right;white-space:nowrap"><button class="qdel" title="Delete role" onclick="event.stopPropagation();quickDelete(${j.id})">✕</button> <span style="color:var(--color-accent);font-weight:800">→</span></td>
       </tr>`).join("")}
     </tbody>
   </table></div>`;
@@ -317,33 +345,52 @@ function resumePane() {
   }
   if (!j.resumes.length) {
     return `<div style="border:2px dashed var(--color-divider);padding:36px 24px">
-      <div style="font-family:var(--font-heading);font-weight:800;font-size:18px">No draft for this role.</div>
-      <div style="font-size:13px;color:var(--color-neutral-700);margin-top:6px;max-width:44ch">Tailoring pulls from data/fact_bank.md, drafts against this JD, then runs the grounding check. About 20 seconds.</div>
-      <button class="btn btn-primary" style="margin-top:14px" onclick="tailor(${j.id})">Tailor resume</button>
+      <div style="font-family:var(--font-heading);font-weight:800;font-size:18px">No resume for this role.</div>
+      <div style="font-size:13px;color:var(--color-neutral-700);margin-top:6px;max-width:46ch">Tailor one from data/fact_bank.md (drafts against this JD, then a grounding check, ~20s), or upload a resume you already have.</div>
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button class="btn btn-primary" onclick="tailor(${j.id})">Tailor resume</button>
+        <button class="btn btn-secondary" onclick="pickUpload(${j.id})">Upload existing</button>
+      </div>
     </div>`;
   }
   const r = APP.resume;
   const tabs = j.resumes.map(v => `<button class="btn" style="font-size:12px;padding:5px 12px;border:1px solid var(--color-divider);${v.id === r.id ? "background:var(--color-accent);color:var(--color-bg)" : "background:var(--color-surface)"}" onclick="selectResume(${v.id})">v${v.version}</button>`).join("");
-  const groundTag = r.grounded === 1 ? `<span class="tag tag-neutral">grounded</span>` : r.grounded === 0 ? `<span class="tag tag-accent">flagged</span>` : "";
+  const groundTag = r.source === "uploaded" ? `<span class="tag tag-neutral">uploaded</span>`
+    : r.grounded === 1 ? `<span class="tag tag-neutral">grounded</span>`
+    : r.grounded === 0 ? `<span class="tag tag-accent">flagged</span>` : "";
   const apprTag = r.approved ? `<span class="tag tag-outline">approved</span>` : "";
   const flags = (r.grounding && r.grounding.claims || []).filter(c => !c.supported);
   return `<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-      ${kicker("Tailored resume")}<div style="display:flex;gap:1px;margin-left:auto">${tabs}</div>
+      ${kicker("Resumes")}
+      <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
+        <button class="btn btn-ghost" style="font-size:12px" onclick="pickUpload(${j.id})">+ Upload</button>
+        <div style="display:flex;gap:1px">${tabs}</div>
+      </div>
     </div>
     <div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--color-surface);border-bottom:2px solid var(--color-divider)">
       <span style="font-family:var(--font-heading);font-weight:800;font-size:14px">v${r.version}</span>
       ${groundTag} ${apprTag}
       <span style="font-size:11px;color:var(--color-neutral-600)">${esc(r.created_at || "")}</span>
       <div style="margin-left:auto;display:flex;gap:6px">
-        <button class="btn btn-secondary" onclick="download(${r.id})">Download .docx</button>
+        <button class="btn btn-secondary" onclick="download(${r.id})">Download</button>
         <button class="btn btn-primary" onclick="approve(${r.id})" ${r.approved ? "disabled" : ""}>Approve</button>
       </div>
     </div>
+    ${r.source === "uploaded" ? uploadedView(r) : `
     <div class="seg" style="margin:12px 0">
       <label class="seg-opt"><input type="radio" name="rt" ${APP.rtab === "preview" ? "checked" : ""} onchange="APP.rtab='preview';render()"><span>Preview</span></label>
       <label class="seg-opt"><input type="radio" name="rt" ${APP.rtab === "grounding" ? "checked" : ""} onchange="APP.rtab='grounding';render()"><span>Grounding (${flags.length} flagged)</span></label>
     </div>
-    ${APP.rtab === "preview" ? resumePreview(r.draft) : grounding(r)}`;
+    ${APP.rtab === "preview" ? resumePreview(r.draft) : grounding(r)}`}`;
+}
+
+function uploadedView(r) {
+  const name = (r.file_path || "").split(/[\\/]/).pop();
+  return `<div style="border:2px solid var(--color-divider);padding:28px 24px;margin-top:12px;background:var(--color-surface)">
+    <div style="font-family:var(--font-heading);font-weight:800;font-size:16px">Uploaded resume</div>
+    <div style="font-size:13px;color:var(--color-neutral-700);margin-top:6px;max-width:48ch">This file wasn't generated by the pipeline, so there's no preview or grounding check. Use Download above to open it.</div>
+    <div style="font-size:12px;color:var(--color-neutral-600);margin-top:10px">${esc(name)}</div>
+  </div>`;
 }
 
 function resumePreview(d) {

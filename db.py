@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS resumes (
     version INTEGER, file_path TEXT, approved INTEGER DEFAULT 0,
     grounded INTEGER,              -- 1 = every claim supported, 0 = something flagged
     grounding_json TEXT,           -- full GroundingResult for the dashboard
+    source TEXT DEFAULT 'tailored',-- 'tailored' (pipeline) or 'uploaded' (external file)
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
@@ -48,6 +49,8 @@ def _migrate(c: sqlite3.Connection) -> None:
         c.execute("ALTER TABLE resumes ADD COLUMN grounded INTEGER")
     if "grounding_json" not in cols:
         c.execute("ALTER TABLE resumes ADD COLUMN grounding_json TEXT")
+    if "source" not in cols:
+        c.execute("ALTER TABLE resumes ADD COLUMN source TEXT DEFAULT 'tailored'")
 
     # jobs: move idempotency from a UNIQUE email_id to a per-job dedup_key, so a
     # single digest email can hold many jobs. Changing a column constraint means
@@ -259,8 +262,8 @@ def resumes_for_job(job_id: int) -> list[dict]:
     with sqlite3.connect(DB_PATH) as c:
         c.row_factory = sqlite3.Row
         rows = c.execute(
-            "SELECT id, job_id, version, file_path, approved, grounded, created_at "
-            "FROM resumes WHERE job_id = ? ORDER BY version DESC",
+            "SELECT id, job_id, version, file_path, approved, grounded, source, "
+            "created_at FROM resumes WHERE job_id = ? ORDER BY version DESC",
             (job_id,),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -279,6 +282,27 @@ def set_approved(resume_id: int, approved: bool = True) -> None:
     with sqlite3.connect(DB_PATH) as c:
         c.execute("UPDATE resumes SET approved = ? WHERE id = ?",
                   (1 if approved else 0, resume_id))
+
+
+def save_uploaded_resume(job_id: int, data: bytes, ext: str = ".docx") -> tuple[int, int]:
+    """Attach an EXISTING resume file (not tailored by the pipeline) to a job as a
+    new version. Shares the version sequence with tailored drafts; grounded/draft
+    stay null since there's nothing to fact-check. Returns (resume_id, version)."""
+    out_dir = RESUMES_DIR / str(job_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(DB_PATH) as c:
+        version = c.execute(
+            "SELECT COALESCE(MAX(version), 0) + 1 FROM resumes WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()[0]
+        path = out_dir / f"v{version}{ext}"
+        path.write_bytes(data)
+        cur = c.execute(
+            "INSERT INTO resumes (job_id, version, file_path, approved, source) "
+            "VALUES (?, ?, ?, 0, 'uploaded')",
+            (job_id, version, str(path)),
+        )
+        return cur.lastrowid, version
 
 
 def delete_job(job_id: int) -> None:
