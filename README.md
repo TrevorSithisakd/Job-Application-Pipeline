@@ -1,95 +1,155 @@
 # Job Application Pipeline
 
-LLM pipeline: ingest roles from email -> extract structured data -> score fit
--> draft a tailored resume (RAG + human approval) -> track in a dashboard.
+A local, single-user app that turns your job-alert inbox into a tailored-resume
+production line:
 
-## Run (once stages are implemented)
-```
-pip install -r requirements.txt
-python pipeline.py           # ingest -> extract -> score -> store
-streamlit run dashboard.py   # view the board
-```
+**Gmail alerts → extract every posting → score fit → draft a tailored resume →
+fact-check it → you approve → download a `.docx`.**
 
-## Flow
-```
-Gmail alerts -> ingest -> extract(LLM) -> SQLite(jobs)
-                                   |
-                          fit_score(LLM) -> SQLite(fit)
-                                   |
-        fact_bank + resume -> tailor(LLM) -> [approval] -> SQLite(resumes)
-                                   |
-                            Streamlit dashboard
-```
-
-## Files
-| File | Role |
-|------|------|
-| `schemas.py` | Pydantic contracts (validation) |
-| `llm.py` | One inference wrapper: model tiers, retries, JSON repair |
-| `db.py` | SQLite: jobs / applications / resumes |
-| `stages/ingest.py` | Gmail -> raw emails |
-| `stages/extract.py` | email -> Job |
-| `stages/fitscore.py` | Job + profile -> FitScore |
-| `stages/tailor.py` | Job + fact bank -> resume draft |
-| `pipeline.py` | Orchestrator (run one command) |
-| `dashboard.py` | Streamlit board |
-| `data/profile.md` | Fit-score context (short) |
-| `data/fact_bank.md` | RAG source (truthful facts only) |
-
-## Build order (Week 7 skeleton = get one thread green end to end)
-1. `data/profile.md` + `data/fact_bank.md` — fill from your Optiver resume.
-2. `llm.py` — wire your provider, get `call_structured` returning a valid object.
-3. `stages/extract.py` — paste one job email in, get a valid `Job` out.
-4. `db.py` — `init` + `upsert_job` + `all_jobs`.
-5. `stages/fitscore.py` — score that one Job.
-6. `dashboard.py` — show the row.
-7. `stages/ingest.py` — replace the hand-pasted email with a real Gmail pull.
-8. `stages/tailor.py` — draft stub last.
-
-> Shipped = run once, real roles from your inbox scored and visible, one resume
-> draft generated, pushed to GitHub. Not pretty. Green.
+Everything runs on your machine. Your inbox, database, resumes, and API keys
+never leave it — none of that is in this repository (see [Privacy](#privacy)).
 
 ---
 
-## Learning map — what to learn per step
+## What it does
 
-### Ingest (Gmail)
-- Gmail API OAuth2 flow; `google-api-python-client`, `google-auth-oauthlib`.
-- Gmail query syntax: `from:`, `subject:`, `newer_than:`.
-- Email/MIME parsing (`email` stdlib); stripping HTML to clean text.
+- **Ingest** job-alert emails from Gmail (LinkedIn / SEEK / Indeed / Greenhouse).
+- **Extract** *every* posting from an email — alert digests list many jobs — into
+  validated records.
+- **Fit-score** each role against your profile (0–100 + rationale + missing
+  keywords + a track: ml-engineer / data-scientist / data-analyst).
+- **Tailor** a resume for a role using only facts from your fact bank (RAG-style),
+  then **grounding-check** every claim against that fact bank — an unsupported
+  claim (e.g. "fine-tuned" when you only "used" a model) is flagged and blocks
+  approval.
+- **Render** the approved draft to a `.docx`.
+- **Track** it all in a local web app: a status board (drag between
+  interested → applied → interviewing → offer → rejected), a table, a job detail
+  view, manual role entry, and a "run ingest" button.
 
-### Extract
-- Prompt design for extraction (instructions + schema + input).
-- Structured/JSON output; `temperature=0` for deterministic parsing.
-- Pydantic v2 validation; parse-or-retry; dedup/idempotency.
+## How it works
 
-### Fit-score
-- The split: rubric (instructions) vs profile (context) vs retrieval (none here).
-- Rubric/scoring design; constrained outputs; enum `Literal` fields.
-- Calibration — does a score mean the same thing across roles?
+```
+Gmail alerts ─▶ ingest ─▶ extract (LLM, one email → many Jobs) ─▶ SQLite(jobs)
+                                                │
+                                       fit-score (LLM) ─▶ SQLite(fit + track)
+                                                │
+        fact bank + JD ─▶ tailor (LLM) ─▶ grounding check (LLM) ─▶ SQLite(resumes) + .docx
+                                                │
+                                    FastAPI + web UI (localhost)
+```
 
-### Resume tailor (RAG)
-- RAG fundamentals: retrieval vs context-stuffing (v1 stuffs).
-- Embeddings + cosine similarity + a vector store (Phase 2 only).
-- Grounding / fact-checking to kill hallucination; human-in-the-loop.
-- Resume templating.
+Two ideas hold it together:
+1. **Every stage boundary is a typed contract** (a Pydantic schema). If an LLM's
+   output doesn't validate, it's rejected and retried.
+2. **The probabilistic surface is kept small.** LLMs draft and fact-check;
+   plain Python renders the `.docx` and enforces structure — so the output is
+   reproducible and testable.
 
-### Store (SQLite)
-- SQL basics; schema design; foreign keys.
-- `sqlite3` module; idempotent upserts.
+## Requirements
 
-### Inference wrapper
-- LLM API usage; retries + exponential backoff.
-- Cost/latency; model tiering; caching; token budgeting.
+- **Python 3.10+**
+- A **DeepSeek API key** (the default LLM provider — OpenAI-compatible, cheap).
+  Swappable in `llm.py`.
+- A **Google Cloud project** with the Gmail API enabled, for reading your alerts.
 
-### Dashboard (Streamlit)
-- Streamlit basics: `st.dataframe`, widgets, `session_state`.
-- Reading a DB into a view; later: edit status, approve/reject.
+## Setup
 
-### Orchestration
-- Composing stages; where to catch errors; run idempotency; logging.
+```bash
+git clone <your-fork-url>
+cd job-application-pipeline
 
-## The one concept behind the whole thing
-Every LLM call = **construct prompt -> call -> validate output into a schema**.
-Extract and fit-score inject *fixed* context (email, profile). Only resume
-tailoring uses *retrieved* context, and only that stage needs a grounding check.
+python -m venv job_pipe_env
+# Windows:  job_pipe_env\Scripts\activate
+# macOS/Linux:  source job_pipe_env/bin/activate
+pip install -r requirements.txt
+```
+
+### 1. LLM key
+```bash
+cp .env.example .env        # then edit .env and paste your key
+# DEEPSEEK_API_KEY=sk-...
+```
+
+### 2. Your profile and fact bank (required)
+The app fails loudly without these — by design, so it never scores or drafts
+against nothing.
+```bash
+cp data/profile.example.md    data/profile.md
+cp data/fact_bank.example.md  data/fact_bank.md
+```
+Fill both with your **real, verifiable** details. The fact bank is the *only*
+source the resume writer may use, and the grounding check rejects anything not in
+it — so keep it truthful and specific.
+
+### 3. Gmail access
+1. In the [Google Cloud Console](https://console.cloud.google.com/): create a
+   project, enable the **Gmail API**, and create an **OAuth client ID** of type
+   **Desktop app**.
+2. Download it as **`credentials.json`** into the project root.
+3. The first run opens a browser to grant **read-only** Gmail access and writes
+   `token.json`. (Tokens for an app in "testing" expire after ~7 days — set the
+   OAuth consent screen to "In production" to stop the weekly re-auth.)
+
+## Usage
+
+### Run the pipeline (fetch + score)
+```bash
+python -m pipeline        # last 7 days
+python -m pipeline 3      # last 3 days
+```
+Ingests your alerts, extracts all postings, and fit-scores any **new** ones
+(already-scored jobs are skipped, so re-runs are fast and cheap).
+
+### Run the web app
+```bash
+python run_app.py         # or double-click run_app.bat (Windows)
+```
+Opens `http://127.0.0.1:8000`. From there you can:
+- browse the **board / table**, filter, and drag jobs between statuses;
+- open a role, **paste the full JD** (alerts only carry a teaser), then **Tailor**;
+- review the resume **preview** and the **grounding** report, **Approve**, and
+  **Download .docx**;
+- **Add a role manually**, **delete** a role, or **run ingest** for a chosen
+  window right from the toolbar.
+
+### Tests
+```bash
+python -m pytest -q       # offline; LLM calls are mocked
+```
+
+## Project structure
+
+| Path | Role |
+|------|------|
+| `schemas.py` | Pydantic contracts for every LLM output |
+| `llm.py` | One inference wrapper: model tiers, retries, JSON repair |
+| `db.py` | SQLite: jobs / resumes, dedup, migrations |
+| `stages/ingest.py` | Gmail → cleaned email bodies |
+| `stages/extract.py` | email → list of `Job`s (digests → many) |
+| `stages/fitscore.py` | Job + profile → fit score |
+| `stages/tailor.py` | Job + fact bank → draft + grounding check |
+| `stages/render.py` | `ResumeDraft` → `.docx` (deterministic) |
+| `pipeline.py` | Orchestrator — one command |
+| `api.py` | FastAPI: JSON API + serves the frontend |
+| `frontend/` | The web UI (no build step) |
+| `run_app.py` / `run_app.bat` | One-click launcher |
+| `data/*.example.md` | Templates for your profile + fact bank |
+
+## Privacy
+
+Nothing personal is tracked by git — not now and not in history. `.gitignore`
+excludes `applications.db` (+ backups), `token.json`, `credentials.json`, `.env`,
+your `data/profile.md` and `data/fact_bank.md`, and `data/resumes/`. A clone
+contains only code and the example templates.
+
+## Notes & limits
+
+- **Local, single-user.** No auth, meant to run on your own machine at localhost.
+- **Alert emails are teasers.** The full JD lives behind each posting's link;
+  paste it into the job before tailoring (scraping is deliberately avoided to
+  respect the job boards' terms).
+- **Dedup** is by normalized `company + title`, since the same role appears across
+  boards with different tracking URLs.
+- Tailoring makes two quality-tier LLM calls per resume; fit-scoring makes one
+  cheap call per new job.
