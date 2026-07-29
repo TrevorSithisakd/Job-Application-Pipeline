@@ -69,7 +69,8 @@ async function tailor(id) {
   const timer = setInterval(() => { i = Math.min(i + 1, stages.length - 1); APP.tailorStage = stages[i]; const el = $("tailorStage"); if (el) el.textContent = stages[i]; }, 7000);
   try {
     const res = await api(`/api/jobs/${id}/tailor`, { method: "POST" });
-    toast(res.grounded ? `v${res.version} drafted — all claims grounded` : `v${res.version} drafted — ${res.flagged.length} flagged`);
+    const fit = res.pages === 1 ? "1 page" : `${res.pages} pages`;
+    toast(`v${res.version} drafted — ${fit} · ${res.grounded ? "grounded" : res.flagged.length + " flagged"}`);
   } catch (e) { toast("Tailoring failed — check the server console."); }
   finally { clearInterval(timer); APP.tailoring = false; await openJob(id); }
 }

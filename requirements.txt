@@ -11,3 +11,8 @@ uvicorn
 
 # Dev/test only — not needed to run the pipeline.
 pytest>=8
+
+# Optional: one-page fill check for rendered resumes (stages/fillcheck.py).
+# docx2pdf drives an installed MS Word for docx->pdf; pymupdf renders/counts pages.
+docx2pdf
+pymupdf

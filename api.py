@@ -175,6 +175,9 @@ def tailor(job_id: int) -> dict:
         "version": result.version,
         "grounded": result.grounding.all_supported,
         "flagged": [c.claim for c in result.grounding.flagged],
+        "pages": result.pages,
+        "fill_pct": result.fill_pct,
+        "fit_notes": result.fit_notes,
     }
 
 

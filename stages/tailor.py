@@ -26,6 +26,7 @@ from schemas import (Job, ResumeDraft, GroundingReport, GroundingResult,
                      GroundedClaim)
 from llm import call_structured
 from stages.render import render
+from stages.fillcheck import fit_to_one_page
 
 
 def _load_fact_bank() -> str:
@@ -84,7 +85,8 @@ Return ONLY a JSON object conforming to this schema (no prose, no markdown fence
 class TailorResult:
     """What the tailor stage produced for one job. Not an LLM contract (that's
     ResumeDraft) — an internal aggregate, so it lives here, not in schemas.py.
-    Page-count fields get added in Phase D."""
+    `draft` is the fitted draft actually rendered; pages/fill_pct/fit_notes come
+    from the one-page fit."""
     job_id: int
     resume_id: int
     version: int
@@ -92,6 +94,9 @@ class TailorResult:
     grounding: GroundingResult
     json_path: str
     docx_path: str
+    pages: int
+    fill_pct: float
+    fit_notes: list
 
 
 def draft_structured(job: Job) -> ResumeDraft:
@@ -176,12 +181,17 @@ def tailor_job(job_id: int) -> TailorResult:
     job = db.get_job(job_id)
     draft = draft_structured(job)
     grounding = check_grounding(draft)           # safety layer 1: fact-check every claim
-    resume_id, version, json_path = db.save_resume(job_id, draft, grounding=grounding)
-    docx_path = render(draft, job_id, version)   # deterministic: draft -> .docx deliverable
+    # Fit to exactly one page (scale spacing/font, trim only if needed). Uses the
+    # portable estimator — no Word/LibreOffice required. Save + render the FITTED
+    # draft so the preview matches the .docx.
+    fitted, style, est, fit_notes = fit_to_one_page(draft)
+    resume_id, version, json_path = db.save_resume(job_id, fitted, grounding=grounding)
+    docx_path = render(fitted, job_id, version, style=style)   # deterministic deliverable
     return TailorResult(
         job_id=job_id, resume_id=resume_id, version=version,
-        draft=draft, grounding=grounding,
+        draft=fitted, grounding=grounding,
         json_path=str(json_path), docx_path=str(docx_path),
+        pages=est["pages"], fill_pct=est["fill_pct"], fit_notes=fit_notes,
     )
 
 
@@ -203,6 +213,8 @@ if __name__ == "__main__":
     _ok = len(_g.claims) - len(_g.flagged)
     print(f"Drafted resume v{_result.version} (pending)")
     print(f"  docx:    {_result.docx_path}")
+    print(f"  fit:     ~{_result.fill_pct}% of {_result.pages} page(s)"
+          + (f"  (trimmed: {'; '.join(_result.fit_notes)})" if _result.fit_notes else ""))
     print(f"Grounding: {_ok}/{len(_g.claims)} claims supported.")
     for _c in _g.flagged:
         print(f"  [FLAG] {_c.claim}")
