@@ -22,10 +22,12 @@ never leave it — none of that is in this repository (see [Privacy](#privacy)).
   then **grounding-check** every claim against that fact bank — an unsupported
   claim (e.g. "fine-tuned" when you only "used" a model) is flagged and blocks
   approval.
-- **Render** the approved draft to a `.docx`.
+- **Fit & render** the draft to a **one-page** `.docx` in a fixed house style
+  (Calibri, navy headings), auto-tightened to fill exactly one page.
 - **Track** it all in a local web app: a status board (drag between
   interested → applied → interviewing → offer → rejected), a table, a job detail
-  view, manual role entry, and a "run ingest" button.
+  view, manual role entry, uploading an existing resume, quick job delete, and a
+  "run ingest" button.
 
 ## How it works
 
@@ -34,7 +36,7 @@ Gmail alerts ─▶ ingest ─▶ extract (LLM, one email → many Jobs) ─▶ 
                                                 │
                                        fit-score (LLM) ─▶ SQLite(fit + track)
                                                 │
-        fact bank + JD ─▶ tailor (LLM) ─▶ grounding check (LLM) ─▶ SQLite(resumes) + .docx
+   fact bank + JD ─▶ tailor (LLM) ─▶ grounding (LLM) ─▶ one-page fit ─▶ render ─▶ SQLite(resumes) + .docx
                                                 │
                                     FastAPI + web UI (localhost)
 ```
@@ -103,15 +105,16 @@ Ingests your alerts, extracts all postings, and fit-scores any **new** ones
 
 ### Run the web app
 ```bash
-python run_app.py         # or double-click run_app.bat (Windows)
+python run_app.py         # or double-click givemeajob.bat (Windows)
 ```
 Opens `http://127.0.0.1:8000`. From there you can:
 - browse the **board / table**, filter, and drag jobs between statuses;
 - open a role, **paste the full JD** (alerts only carry a teaser), then **Tailor**;
 - review the resume **preview** and the **grounding** report, **Approve**, and
   **Download .docx**;
-- **Add a role manually**, **delete** a role, or **run ingest** for a chosen
-  window right from the toolbar.
+- **Upload** an existing `.docx`/`.pdf` resume to a role (kept as an "uploaded" version);
+- **Add a role manually**, **quick-delete** a role (× on any card/row), or
+  **run ingest** for a chosen window right from the toolbar.
 
 ### Tests
 ```bash
@@ -128,12 +131,13 @@ python -m pytest -q       # offline; LLM calls are mocked
 | `stages/ingest.py` | Gmail → cleaned email bodies |
 | `stages/extract.py` | email → list of `Job`s (digests → many) |
 | `stages/fitscore.py` | Job + profile → fit score |
-| `stages/tailor.py` | Job + fact bank → draft + grounding check |
-| `stages/render.py` | `ResumeDraft` → `.docx` (deterministic) |
+| `stages/tailor.py` | Job + fact bank → draft + grounding check + one-page fit |
+| `stages/render.py` | `ResumeDraft` → styled one-page `.docx` (deterministic) |
+| `stages/fillcheck.py` | One-page fit: estimate height, tighten/trim to one page |
 | `pipeline.py` | Orchestrator — one command |
 | `api.py` | FastAPI: JSON API + serves the frontend |
 | `frontend/` | The web UI (no build step) |
-| `run_app.py` / `run_app.bat` | One-click launcher |
+| `run_app.py` / `givemeajob.bat` | One-click launcher |
 | `data/*.example.md` | Templates for your profile + fact bank |
 
 ## Privacy
@@ -151,5 +155,8 @@ contains only code and the example templates.
   respect the job boards' terms).
 - **Dedup** is by normalized `company + title`, since the same role appears across
   boards with different tracking URLs.
+- **One-page fit** uses a dependency-free height estimator, so it runs anywhere.
+  An *exact* page check (`python -m stages.fillcheck <docx>`) is optional and needs
+  MS Word (`docx2pdf`) or LibreOffice installed.
 - Tailoring makes two quality-tier LLM calls per resume; fit-scoring makes one
   cheap call per new job.
