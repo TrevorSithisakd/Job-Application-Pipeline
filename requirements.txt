@@ -1,18 +1,16 @@
-# v1 — keep it small. Add embeddings/vector store only in Phase 2.
+# Core runtime — everything needed to run the app + web server.
 pydantic>=2
-openai>=1.0          # used as the client for DeepSeek's OpenAI-compatible API
-python-dotenv        # loads secrets from .env so keys stay out of the shell env
-google-api-python-client
-google-auth-oauthlib
+openai>=1.0          # client for DeepSeek's OpenAI-compatible API
+python-dotenv        # loads secrets from .env
+python-docx          # render.py builds the .docx resume
+python-multipart     # FastAPI file uploads (upload-resume endpoint)
 
-# Local web app (replaces the Streamlit dashboard)
+# Web app
 fastapi
 uvicorn
 
-# Dev/test only — not needed to run the pipeline.
-pytest>=8
+# Gmail ingest
+google-api-python-client
+google-auth-oauthlib
 
-# Optional: one-page fill check for rendered resumes (stages/fillcheck.py).
-# docx2pdf drives an installed MS Word for docx->pdf; pymupdf renders/counts pages.
-docx2pdf
-pymupdf
+# Dev + optional tooling live in requirements-dev.txt (tests, exact fill check).

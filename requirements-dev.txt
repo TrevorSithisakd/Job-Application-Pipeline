@@ -1,0 +1,10 @@
+# Dev + optional tooling — NOT needed to run or deploy the app.
+-r requirements.txt
+
+pytest>=8
+
+# Exact one-page fill check (stages/fillcheck.check_fill). Needs MS Word
+# (docx2pdf) or LibreOffice installed. The deployed app doesn't use these — the
+# one-page fit runs on the pure-Python estimator.
+docx2pdf
+pymupdf

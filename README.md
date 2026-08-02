@@ -118,8 +118,34 @@ Opens `http://127.0.0.1:8000`. From there you can:
 
 ### Tests
 ```bash
+pip install -r requirements-dev.txt
 python -m pytest -q       # offline; LLM calls are mocked
 ```
+
+## Deploy a demo (Render)
+
+The app is a persistent server, so use a host that runs containers (not
+Vercel/Pages). A `Dockerfile` is included, so **Render** (or Railway / Fly / HF
+Spaces) builds it directly — no Word/LibreOffice needed (the one-page fit uses the
+pure-Python estimator). A fresh deploy boots **populated**: `seed.py` creates a
+demo persona and a few sample jobs automatically, so nothing personal is required.
+
+1. Push this repo to GitHub.
+2. Render → **New → Web Service** → connect the repo. It detects the `Dockerfile`.
+3. Environment variables:
+   - `DEEPSEEK_API_KEY` — **required** (the app won't start without it).
+   - *(optional)* `FACT_BANK_MD` / `PROFILE_MD` — paste your **real** fact bank /
+     profile content to tailor authentic resumes in the demo. Omit to use the demo
+     persona. This keeps your personal data out of the public repo.
+4. Deploy → Render gives you a public HTTPS URL.
+
+**For an interview:**
+- The free tier **sleeps when idle** (~30-50s cold start) — open the URL a few
+  minutes before the call to warm it, or use an always-on tier / Railway.
+- State is **ephemeral** on free tiers: the DB re-seeds clean on each restart (fine
+  for a demo; add a persistent disk if you want changes to persist).
+- **No auth** — anyone with the link can use it (and spend your API key). Fine for a
+  private interview link; don't post it publicly.
 
 ## Project structure
 
@@ -138,6 +164,8 @@ python -m pytest -q       # offline; LLM calls are mocked
 | `api.py` | FastAPI: JSON API + serves the frontend |
 | `frontend/` | The web UI (no build step) |
 | `run_app.py` / `givemeajob.bat` | One-click launcher |
+| `seed.py` | Boot helper: demo data + example/env fallback (for cloud deploys) |
+| `Dockerfile` / `.dockerignore` | Container build for Render/Railway/Fly/HF Spaces |
 | `data/*.example.md` | Templates for your profile + fact bank |
 
 ## Privacy

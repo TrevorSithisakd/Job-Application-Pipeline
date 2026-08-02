@@ -1,0 +1,24 @@
+# Keep the image lean and free of secrets / personal data.
+job_pipe_env/
+.git/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets + personal data — NEVER bake into the image.
+.env
+token.json
+credentials.json
+*.db
+*.bak
+data/profile.md
+data/fact_bank.md
+data/resumes/
+debug_out/
+
+# Local/dev only (not needed in the container).
+tests/
+conftest.py
+requirements-dev.txt
+run_app.py
+givemeajob.bat

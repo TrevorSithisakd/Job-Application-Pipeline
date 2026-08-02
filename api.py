@@ -18,13 +18,22 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 import db
-import pipeline
+import seed
 from paths import ROOT
+
+# Make required data files exist BEFORE importing the stages below, which read
+# profile.md / fact_bank.md at import time. A no-op on a real local setup; on a
+# bare/cloud deploy it materialises the demo persona (or your PROFILE_MD /
+# FACT_BANK_MD env vars) so the app can start.
+seed.ensure_files()
+
+import pipeline
 from schemas import Job
 from stages import fitscore, ingest
 from stages.tailor import tailor_job
 
-db.init()   # schema + grounding migration, once at startup
+db.init()          # schema + grounding migration
+seed.ensure_seed() # populate a few demo jobs if the DB is empty (no-op if not)
 
 app = FastAPI(title="Job Application Pipeline")
 
