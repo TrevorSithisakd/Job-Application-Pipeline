@@ -9,7 +9,8 @@ LEARN: pydantic v2 (BaseModel, Field constraints, Literal enums, Optional).
 from __future__ import annotations
 from datetime import date
 from typing import Literal, Optional
-from pydantic import BaseModel, Field, computed_field
+from pydantic import (BaseModel, Field, computed_field, field_validator,
+                      model_validator)
 
 
 class Job(BaseModel):
@@ -31,12 +32,23 @@ class JobList(BaseModel):
     jobs: list[Job] = []
 
 
+# NOTE on `track`: it was a Literal of four fixed values. Tracks are configurable
+# now (JobPreferences.tracks), and a Literal cannot depend on runtime settings, so
+# it is a plain str. The validation did not disappear — it moved to
+# fitscore.fit_score(), which checks the value against the CONFIGURED track list
+# and falls back to "none". A stale Literal here would have rejected a perfectly
+# valid custom track as malformed LLM output.
+#
+# This is a comment rather than a docstring on purpose: these docstrings are sent
+# to the model verbatim via model_json_schema(), and notes about our own refactor
+# are noise in a scoring prompt.
+
 class FitScore(BaseModel):
     """Produced by the FIT-SCORE stage. score is constrained 0-100."""
     score: int = Field(ge=0, le=100)
     rationale: str = Field(min_length=1)
     missing_keywords: list[str] = []
-    track: Literal["ml-engineer", "data-scientist", "data-analyst", "none"]
+    track: str = "none"
 
 
 # --- TAILOR stage (stage 4) -------------------------------------------------
@@ -128,3 +140,173 @@ class GroundingResult(BaseModel):
     @property
     def flagged(self) -> list[GroundedClaim]:
         return [c for c in self.claims if not c.supported]
+
+
+# --- Settings (Setup pane) ---------------------------------------------------
+# These are contracts too, just with a human on the other side instead of an LLM.
+# Modelling them here rather than reading loose dicts out of JSON means a
+# corrupted settings file or a bad slider value is rejected at the boundary with
+# a field-level error, exactly like a malformed LLM response is.
+
+DEFAULT_TRACKS = ["ml-engineer", "data-scientist", "data-analyst"]
+
+
+class JobPreferences(BaseModel):
+    """What an ideal role looks like to you. Replaces the hardcoded
+    "Sydney/remote-AU" and the fixed track list that used to live inside the
+    fit-score prompt (stages/fitscore.py RUBRIC)."""
+    target_titles: list[str] = []
+    locations: list[str] = []
+    remote_policy: Literal["any", "remote", "hybrid", "onsite"] = "any"
+    seniority: list[str] = []                    # e.g. ["graduate", "junior"]
+    salary_floor: Optional[int] = Field(default=None, ge=0)
+    salary_currency: str = "AUD"
+    must_have_skills: list[str] = []
+    nice_to_have_skills: list[str] = []
+    dealbreakers: list[str] = []                 # e.g. "requires security clearance"
+    tracks: list[str] = Field(default_factory=lambda: list(DEFAULT_TRACKS))
+
+    @field_validator("tracks")
+    @classmethod
+    def _non_empty_tracks(cls, v: list[str]) -> list[str]:
+        """An empty track list would make the model invent categories, so the
+        score board would group jobs under labels that change every run."""
+        cleaned = [t.strip() for t in v if t.strip()]
+        return cleaned or list(DEFAULT_TRACKS)
+
+    def all_tracks(self) -> list[str]:
+        """Configured tracks plus the always-available "none" escape hatch — the
+        model must be able to say "this fits no track I was given"."""
+        return [*self.tracks, "none"]
+
+
+class RubricDimension(BaseModel):
+    """One weighted thing the fit score is judged on. `key` is stable (used for
+    matching on save); `label` is what the model and the UI both read."""
+    key: str
+    label: str
+    weight: int = Field(ge=0, le=100)
+
+
+DEFAULT_DIMENSIONS = [
+    {"key": "skills", "label": "Skills and tooling overlap", "weight": 35},
+    {"key": "seniority", "label": "Seniority match", "weight": 20},
+    {"key": "location", "label": "Location and remote policy", "weight": 20},
+    {"key": "track", "label": "Track fit", "weight": 15},
+    {"key": "salary", "label": "Salary against your floor", "weight": 10},
+]
+
+
+class ScoringRubric(BaseModel):
+    """How the fit score is judged. Weights are rendered into the prompt as an
+    explicit priority list; the bands are calibration anchors that keep a 70
+    meaning roughly the same thing across roles (the calibration problem the
+    fitscore module docstring calls out)."""
+    dimensions: list[RubricDimension] = Field(
+        default_factory=lambda: [RubricDimension(**d) for d in DEFAULT_DIMENSIONS],
+        min_length=1,
+    )
+    strong_min: int = Field(default=75, ge=0, le=100)     # >= this: strong match
+    possible_min: int = Field(default=50, ge=0, le=100)   # >= this: worth a look
+    band_notes: str = ""                                  # what the bands mean, your words
+    extra_criteria: str = ""                              # free-text escape hatch
+
+    @model_validator(mode="after")
+    def _bands_ordered(self) -> "ScoringRubric":
+        if self.possible_min >= self.strong_min:
+            raise ValueError(
+                "possible_min must be below strong_min — otherwise the 'worth a "
+                "look' band is empty and every job is either strong or rejected."
+            )
+        return self
+
+    def active_dimensions(self) -> list[RubricDimension]:
+        """Weight 0 means "ignore this", so it is dropped from the prompt rather
+        than sent as a zero the model has to reason about."""
+        return [d for d in self.dimensions if d.weight > 0]
+
+
+class EmailSource(BaseModel):
+    """One sender to scrape, as a bare domain ("seek.com.au") or a full address
+    ("jobalerts-noreply@linkedin.com"). Gmail's from: operator matches both, and
+    the original hardcoded _SENDERS list already mixed the two forms."""
+    value: str = Field(min_length=3)
+    label: str = ""                                       # display name from the inbox
+    enabled: bool = True
+    origin: Literal["default", "scan", "manual"] = "manual"
+
+    @field_validator("value")
+    @classmethod
+    def _normalise(cls, v: str) -> str:
+        """Lowercase and strip any display-name wrapper, so "SEEK <A@Seek.com.au>"
+        and "a@seek.com.au" cannot both end up in the list as separate entries."""
+        v = v.strip().lower()
+        if "<" in v and ">" in v:
+            v = v[v.index("<") + 1:v.index(">")].strip()
+        return v.lstrip("@")
+
+
+class AppSettings(BaseModel):
+    """The whole settings document, persisted as data/settings.json. The API key
+    is deliberately NOT here — it lives in .env (see settings.py)."""
+    preferences: JobPreferences = Field(default_factory=JobPreferences)
+    rubric: ScoringRubric = Field(default_factory=ScoringRubric)
+    email_sources: list[EmailSource] = []
+    # False until the user has actually been through sender setup. Distinguishes
+    # "no sources chosen yet" (offer the scan) from "deliberately chose none".
+    sources_configured: bool = False
+
+    def enabled_sources(self) -> list[str]:
+        return [s.value for s in self.email_sources if s.enabled]
+
+
+# --- Sender discovery (Setup: email sources) --------------------------------
+
+class SenderStat(BaseModel):
+    """One sender found by the inbox scan. Crosses the API boundary to the Setup
+    pane, so it is a model rather than a loose dict."""
+    domain: str
+    address: str = ""
+    display_name: str = ""
+    count: int = 0
+    sample_subjects: list[str] = []
+    # "heuristic" = matched a known job-board pattern locally; "llm" = the batched
+    # classifier said yes; "unknown" = neither, shown unticked behind a toggle.
+    confidence: Literal["heuristic", "llm", "unknown"] = "unknown"
+    already_added: bool = False
+
+
+class SenderVerdict(BaseModel):
+    """The classifier's judgement on one sender."""
+    domain: str
+    is_job_alert: bool
+
+
+class SenderClassification(BaseModel):
+    """LLM contract for the batched sender classification — one call for all the
+    senders the local heuristic could not place."""
+    verdicts: list[SenderVerdict] = []
+
+
+# --- Fact bank extraction (Setup: upload a resume) --------------------------
+# The LLM returns STRUCTURE; Python renders the markdown. Same split as the
+# tailor stage: never let the model emit the final artefact's layout.
+
+class FactItem(BaseModel):
+    text: str = Field(min_length=1)
+    # True when the source resume was vague about it. Surfaced in the markdown so
+    # you can see what to verify — the grounding check treats this file as truth,
+    # so an unmarked guess would silently license a fabricated resume claim.
+    uncertain: bool = False
+
+
+class FactSection(BaseModel):
+    heading: str = Field(min_length=1)
+    items: list[FactItem] = Field(min_length=1)
+
+
+class FactBankDoc(BaseModel):
+    """A resume parsed into the fact bank's shape, pending your review."""
+    name: str = ""
+    contact: str = ""
+    sections: list[FactSection] = Field(min_length=1)

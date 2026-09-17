@@ -5,8 +5,10 @@ LEARN: Gmail API OAuth flow, Gmail query syntax (from:, subject:, newer_than:),
 """
 from __future__ import annotations
 import base64
+import json
 import re
 import sys
+from email.utils import parseaddr
 from html import unescape
 
 from collections import Counter
@@ -20,11 +22,20 @@ from paths import CREDENTIALS_FILE, TOKEN_FILE
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 
-_SENDERS = (
-    'jobalerts-noreply@linkedin.com OR jobs-noreply@linkedin.com '
-    'OR jobs-listings@linkedin.com OR notifications@us.greenhouse-jobs.com '
-    'OR seek.com.au OR indeed.com OR jobs2web.com'
-)
+
+def _sender_query() -> str:
+    """The `from:(...)` clause, built from the senders configured in Setup.
+
+    This was a hardcoded module constant. It now comes from settings, which fall
+    back to the same built-in list when nothing is configured — so an install
+    that never opens the Setup pane ingests exactly what it did before.
+
+    Imported lazily: settings imports schemas, and this module is imported by
+    api.py during boot; keeping the import inside the function avoids adding
+    another import-time dependency to the startup path.
+    """
+    import settings
+    return " OR ".join(settings.sender_values())
 
 
 def credentials_ready() -> bool:
@@ -50,20 +61,45 @@ def credentials_ready() -> bool:
     return False
 
 
-def fetch_job_emails(days: int = 7, query: str | None = None) -> list[tuple[str, str]]:
+# Gmail returns pages of ~100. A cap keeps a wide window from turning into
+# thousands of per-message API calls; it is high enough that a normal alert
+# volume never reaches it.
+MAX_MESSAGES = 500
+
+
+def fetch_job_emails(days: int = 7, query: str | None = None,
+                     max_messages: int = MAX_MESSAGES) -> list[tuple[str, str]]:
     """Return [(gmail_message_id, clean_text_body), ...] for alerts in the last
     `days` days. `query` overrides the built default entirely.
 
-    Senders found via audit_senders(); re-run it periodically to catch new ones.
+    Senders come from the Setup pane (scan your inbox, or add them by hand).
     Note: noreply@s.seek.com.au also sends application-status emails - those flow
     through here by design and get rejected downstream (extract/fitscore).
+
+    PAGINATES. This used to read only the first page of results — roughly 100
+    messages — and silently drop the rest, which was easy to miss while the
+    sender list was a fixed handful. Now that you can add senders from the UI,
+    a wide window plus a few boards blows past one page routinely, so the run
+    would quietly skip the oldest alerts in its own window.
     """
     if query is None:
-        query = f"from:({_SENDERS}) newer_than:{days}d"
+        query = f"from:({_sender_query()}) newer_than:{days}d"
     service = _gmail_service()
-    resp = service.users().messages().list(userId="me", q=query).execute()
+
+    messages = []
+    page_token = None
+    while len(messages) < max_messages:
+      resp = (service.users().messages()
+              .list(userId="me", q=query, maxResults=100, pageToken=page_token)
+              .execute())
+      messages.extend(resp.get("messages", []))
+      page_token = resp.get("nextPageToken")
+      if not page_token:
+        break
+    messages = messages[:max_messages]
+
     results = []
-    for msg in resp.get("messages", []):
+    for msg in messages:
       msg_id = msg["id"]
       full = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
       body = extract_text(full["payload"])
@@ -153,36 +189,212 @@ def _clean_text(text):
   text = re.sub(r"\n{3,}", "\n\n", text)     # collapse 3+ newlines to a paragraph break
   return text
 
-def audit_senders(query: str = "category:updates newer_than:90d") -> None:
-  """Recall audit: list every sender in a BROAD window, most frequent first.
+# --- Sender discovery (Setup: email sources) --------------------------------
+# Finding which senders to scrape used to mean running `python -m stages.ingest
+# audit` and reading a wall of addresses. Same sweep, but it returns data now so
+# the Setup pane can show it as a checklist.
 
-  Eyeball the output for job-related senders missing from fetch_job_emails'
-  default query. format='metadata' fetches only the named headers - much
-  cheaper than format='full' when bodies aren't needed. Re-run every month
-  or two, and after signing up to any new job board.
+DEFAULT_AUDIT_QUERY = "category:updates newer_than:90d"
+MAX_SCAN_MESSAGES = 800
+
+# Domains and subject phrases that are job alerts with no further thought needed.
+# Cheap, offline, and deterministic — worth trying before spending an LLM call.
+_JOB_DOMAIN_HINTS = (
+    "linkedin", "seek.com", "indeed", "greenhouse", "lever.co", "workday",
+    "glassdoor", "jora", "ziprecruiter", "jobs2web", "smartrecruiters",
+    "myworkday", "careers", "recruit", "hired", "dice.com", "monster",
+    "adzuna", "builtin", "wellfound", "angel.co", "talent",
+)
+_JOB_LOCALPART_HINTS = ("jobalert", "jobs-", "jobs@", "job-alert", "jobsalert",
+                        "noreply-jobs", "alerts", "jobalerts")
+_JOB_SUBJECT_HINTS = (
+    "job alert", "new jobs", "jobs for you", "job recommendations", "now hiring",
+    "new job", "jobs matching", "recommended for you", "apply now", "job digest",
+    "vacanc", "position", "hiring",
+)
+
+
+def _parse_from(raw: str) -> tuple[str, str, str]:
+  """"SEEK <noreply@s.seek.com.au>" -> (display, address, domain).
+
+  Uses email.utils.parseaddr rather than a regex: From headers legitimately
+  contain quoted commas and angle brackets inside the display name, which is
+  exactly where hand-rolled splitting goes wrong.
+  """
+  display, address = parseaddr(raw or "")
+  address = address.strip().lower()
+  domain = address.split("@")[-1] if "@" in address else ""
+  return display.strip().strip('"'), address, domain
+
+
+def _looks_like_job_alert(domain: str, address: str, subjects: list[str]) -> bool:
+  """Local heuristic. Deliberately generous on domains and conservative overall:
+  a false positive costs one unticked checkbox, a false negative means you never
+  see that sender in the list at all."""
+  hay = f"{domain} {address}".lower()
+  if any(h in hay for h in _JOB_DOMAIN_HINTS):
+    return True
+  if any(h in hay for h in _JOB_LOCALPART_HINTS):
+    return True
+  subject_blob = " ".join(subjects).lower()
+  return any(h in subject_blob for h in _JOB_SUBJECT_HINTS)
+
+
+def scan_senders(query: str = DEFAULT_AUDIT_QUERY,
+                 max_messages: int = MAX_SCAN_MESSAGES,
+                 progress: dict | None = None) -> list[dict]:
+  """Sweep a broad window and return every sender found, most frequent first.
+
+  format='metadata' fetches only the named headers — far cheaper than 'full'
+  when bodies aren't needed. Subjects come back in the SAME call as the From
+  header because they cost nothing extra there and are the strongest signal for
+  classifying an ambiguous sender.
+
+  Grouped by DOMAIN, not address: boards rotate local parts
+  (jobs-listings@ / jobalerts-noreply@ / noreply@) but keep the domain, and
+  Gmail's from: operator matches a bare domain fine.
+
+  `progress`, if given, is the shared dict the web app polls — same contract as
+  pipeline.run().
   """
   service = _gmail_service()
-  senders: Counter[str] = Counter()
+  counts: Counter[str] = Counter()
+  info: dict[str, dict] = {}
+  seen = 0
   page_token = None
-  while True:  # unlike fetch, an audit should sweep ALL pages of results
+
+  while seen < max_messages:
     resp = (
         service.users().messages()
-        .list(userId="me", q=query, maxResults=500, pageToken=page_token)
+        .list(userId="me", q=query, maxResults=100, pageToken=page_token)
         .execute()
     )
-    for msg in resp.get("messages", []):
+    batch = resp.get("messages", [])
+    for msg in batch:
+      if seen >= max_messages:
+        break
       meta = (
           service.users().messages()
-          .get(userId="me", id=msg["id"], format="metadata", metadataHeaders=["From"])
+          .get(userId="me", id=msg["id"], format="metadata",
+               metadataHeaders=["From", "Subject"])
           .execute()
       )
-      headers = {h["name"]: h["value"] for h in meta["payload"]["headers"]}
-      senders[headers.get("From", "?")] += 1
+      headers = {h["name"]: h["value"] for h in meta["payload"].get("headers", [])}
+      display, address, domain = _parse_from(headers.get("From", ""))
+      seen += 1
+      if not domain:
+        continue
+      counts[domain] += 1
+      entry = info.setdefault(domain, {"address": address, "display_name": display,
+                                       "subjects": []})
+      subject = headers.get("Subject", "").strip()
+      # Two samples is enough to classify and keeps the LLM payload small.
+      if subject and len(entry["subjects"]) < 2 and subject not in entry["subjects"]:
+        entry["subjects"].append(subject)
+      if progress is not None and seen % 25 == 0:
+        progress.update(scanned=seen, message=f"scanned {seen} emails…")
     page_token = resp.get("nextPageToken")
     if not page_token:
       break
-  for sender, n in senders.most_common():
-    print(f"{n:4d}  {sender}")
+
+  if progress is not None:
+    progress.update(scanned=seen, message="classifying senders…")
+
+  return [
+      {"domain": domain,
+       "address": info[domain]["address"],
+       "display_name": info[domain]["display_name"],
+       "count": n,
+       "sample_subjects": info[domain]["subjects"]}
+      for domain, n in counts.most_common()
+  ]
+
+
+def classify_senders(found: list[dict]) -> list[dict]:
+  """Tag each scanned sender as heuristic / llm / unknown.
+
+  Two passes so the LLM is a fallback, not the mechanism: the heuristic settles
+  the obvious ones offline, and only what is left goes to the model — as ONE
+  batched cheap-tier call, not one per sender. A scan of a busy inbox can turn up
+  a hundred domains; per-sender calls would make this slow and needlessly costly.
+
+  A failed or unavailable classification is not fatal: those senders simply stay
+  "unknown" and appear unticked in the list, which is what they would have been
+  without the call.
+  """
+  undecided = []
+  for row in found:
+    if _looks_like_job_alert(row["domain"], row["address"], row["sample_subjects"]):
+      row["confidence"] = "heuristic"
+    else:
+      row["confidence"] = "unknown"
+      undecided.append(row)
+
+  if not undecided:
+    return found
+
+  try:
+    verdicts = _llm_classify(undecided)
+  except Exception as e:
+    print(f"  [sender classify skipped] {type(e).__name__}: {e}")
+    return found
+
+  for row in undecided:
+    if verdicts.get(row["domain"]):
+      row["confidence"] = "llm"
+  return found
+
+
+_CLASSIFY_SYSTEM = """You identify which email senders send JOB ALERTS or job
+postings — automated emails listing roles a candidate could apply for.
+
+Say true for: job boards, applicant tracking systems, careers teams, recruiter
+alert digests. Say false for everything else: newsletters, marketing, social
+notifications, banking, receipts, and application STATUS updates that contain no
+new postings.
+
+You receive a JSON list of senders with sample subject lines. Return ONLY JSON:
+{"verdicts": [{"domain": "<domain>", "is_job_alert": <bool>}]}
+Give exactly one verdict per domain you were given."""
+
+
+def _llm_classify(rows: list[dict]) -> dict[str, bool]:
+  """One cheap-tier call for all undecided senders. Imported inside the function
+  so this module stays importable (and `python -m stages.ingest audit` keeps
+  working) on an install with no API key configured yet."""
+  from llm import call_structured
+  from schemas import SenderClassification
+
+  payload = [{"domain": r["domain"], "sender": r["address"],
+              "subjects": r["sample_subjects"]} for r in rows]
+  result: SenderClassification = call_structured(
+      _CLASSIFY_SYSTEM, "SENDERS:\n" + json.dumps(payload, indent=2),
+      schema=SenderClassification, tier="cheap", temperature=0.0)
+  return {v.domain.strip().lower(): v.is_job_alert for v in result.verdicts}
+
+
+def discover_senders(query: str = DEFAULT_AUDIT_QUERY,
+                     max_messages: int = MAX_SCAN_MESSAGES,
+                     progress: dict | None = None) -> list[dict]:
+  """Scan + classify + mark what is already configured. The Setup pane's one call."""
+  import settings
+
+  found = classify_senders(scan_senders(query, max_messages, progress=progress))
+  configured = {s.value for s in settings.load().email_sources}
+  for row in found:
+    row["already_added"] = (row["domain"] in configured
+                            or row["address"] in configured)
+  return found
+
+
+def audit_senders(query: str = DEFAULT_AUDIT_QUERY) -> None:
+  """Print the scan, most frequent first — the original terminal workflow, kept
+  working now that scan_senders() returns data instead of printing it."""
+  for row in scan_senders(query):
+    flag = "JOB?" if _looks_like_job_alert(
+        row["domain"], row["address"], row["sample_subjects"]) else "    "
+    print(f"{row['count']:4d}  {flag}  {row['domain']:40s}  {row['display_name']}")
+
 
 if __name__ == "__main__":
   if "audit" in sys.argv:

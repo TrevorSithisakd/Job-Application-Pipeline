@@ -8,6 +8,7 @@ Run it via the launcher (run_app.py / run_app.bat), or directly:
     python -m uvicorn api:app --reload
 """
 from __future__ import annotations
+import copy
 import json
 import threading
 from datetime import date
@@ -19,17 +20,23 @@ from pydantic import BaseModel
 
 import db
 import seed
+import settings
 from paths import ROOT
 
-# Make required data files exist BEFORE importing the stages below, which read
-# profile.md / fact_bank.md at import time. A no-op on a real local setup; on a
-# bare/cloud deploy it materialises the demo persona (or your PROFILE_MD /
-# FACT_BANK_MD env vars) so the app can start.
+# Materialise the demo persona on a bare/cloud deploy (or your PROFILE_MD /
+# FACT_BANK_MD env vars). A no-op on a real local setup.
+#
+# This used to be load-bearing for the imports below, which read profile.md /
+# fact_bank.md at import time and crashed without them. They are read lazily now,
+# so this is purely about seeding a demo — the app boots either way, and the
+# Setup pane is how you fill these in for real.
 seed.ensure_files()
 
+import llm
 import pipeline
-from schemas import Job
-from stages import fitscore, ingest
+from schemas import (AppSettings, EmailSource, Job, JobPreferences,
+                     ScoringRubric)
+from stages import factbank, fitscore, ingest
 from stages.tailor import tailor_job
 
 db.init()          # schema + grounding migration
@@ -116,46 +123,128 @@ def remove_job(job_id: int) -> dict:
     return {"ok": True}
 
 
-# --- Ingest: run the pipeline in the background, polled by the UI -------------
-# A single shared state dict; only one ingest runs at a time. The background
-# thread opens its own sqlite connections per call, so this is thread-safe.
-_ingest = {"running": False, "scored": 0, "skipped": 0, "message": "",
-           "done": True, "error": None}
+# --- Background jobs: started here, polled by the UI --------------------------
+# Three long operations now run this way (ingest, rescore, inbox scan), so the
+# shared-state-dict pattern the ingest used is factored out rather than copied
+# twice more. One instance per job kind; each refuses to start while its own run
+# is in flight. The worker threads open their own sqlite connections per call,
+# so this stays thread-safe.
+
+class BackgroundJob:
+    """A single-slot background task with a pollable progress dict.
+
+    The dict IS the API response — workers update it in place (the same contract
+    pipeline.run(progress=...) already expects), and the /status endpoint returns
+    it verbatim.
+    """
+
+    def __init__(self, **fields):
+        self._defaults = fields
+        self.state: dict = {"running": False, "done": True, "error": None,
+                            "message": "", **fields}
+
+    @property
+    def running(self) -> bool:
+        return bool(self.state["running"])
+
+    def start(self, target, *args) -> None:
+        # copy.deepcopy, not **self._defaults: a mutable default (the scan's
+        # senders list) would otherwise be the SAME object on every run, so one
+        # run appending to it would leak into the next.
+        self.state.update(running=True, done=False, error=None,
+                          message="starting…", **copy.deepcopy(self._defaults))
+        threading.Thread(target=self._run, args=(target, *args), daemon=True).start()
+
+    def _run(self, target, *args) -> None:
+        try:
+            target(*args)
+        except Exception as e:
+            # Surface the class name: "RuntimeError: No DEEPSEEK_API_KEY set" is
+            # actionable in the UI, a bare traceback in the server log is not.
+            self.state["error"] = f"{type(e).__name__}: {e}"
+        finally:
+            self.state.update(running=False, done=True)
+
+
+_ingest = BackgroundJob(scored=0, skipped=0)
+_rescore = BackgroundJob(scored=0, skipped=0, total=0)
+_scan = BackgroundJob(scanned=0, senders=[])
 
 
 class IngestReq(BaseModel):
     days: int = 7
 
 
-def _run_ingest(days: int) -> None:
-    try:
-        pipeline.run(days=days, progress=_ingest)
-    except Exception as e:
-        _ingest["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        _ingest["running"] = False
-        _ingest["done"] = True
-
-
 @app.post("/api/ingest")
 def start_ingest(payload: IngestReq) -> dict:
     """Kick off an ingest over the last `days` days. Pre-flights Gmail auth,
     because a browser fetch can't complete the OAuth consent flow."""
-    if _ingest["running"]:
+    if _ingest.running:
         raise HTTPException(409, "an ingest is already running")
     if not ingest.credentials_ready():
         raise HTTPException(409, "Gmail authorization needed — run `python -m pipeline` "
                                  "once in your terminal to sign in, then try again.")
     days = max(1, min(payload.days, 30))
-    _ingest.update(running=True, scored=0, skipped=0, message="starting…",
-                   done=False, error=None)
-    threading.Thread(target=_run_ingest, args=(days,), daemon=True).start()
+    _ingest.start(lambda: pipeline.run(days=days, progress=_ingest.state))
     return {"started": True, "days": days}
 
 
 @app.get("/api/ingest/status")
 def ingest_status() -> dict:
-    return _ingest
+    return _ingest.state
+
+
+# --- Rescore: re-apply changed criteria to jobs already on the board ----------
+
+class RescoreReq(BaseModel):
+    # False re-scores everything, including jobs whose first scoring failed.
+    only_scored: bool = True
+
+
+def _run_rescore(only_scored: bool) -> None:
+    rows = db.all_jobs()
+    targets = [r for r in rows if r.get("fit_score") is not None] if only_scored else rows
+    _rescore.state.update(total=len(targets))
+    scored = skipped = 0
+    for row in targets:
+        try:
+            job = db.get_job(row["id"])
+            db.set_fit(row["id"], fitscore.fit_score(job))
+            scored += 1
+        except Exception as e:
+            # One unscoreable job (a thin JD, a transient API error) must not
+            # abandon the rest of the batch — same isolation as pipeline.run().
+            skipped += 1
+            print(f"  [skip rescore] {row['id']}: {type(e).__name__}: {e}")
+        _rescore.state.update(scored=scored, skipped=skipped,
+                              message=f"{row['company']} - {row['title']}")
+    _rescore.state.update(message="done")
+
+
+@app.post("/api/jobs/rescore")
+def start_rescore(payload: RescoreReq) -> dict:
+    """Re-score jobs against the CURRENT preferences and rubric. Changing the
+    criteria is only useful if you can re-apply them to what's already here."""
+    if _rescore.running:
+        raise HTTPException(409, "a rescore is already running")
+    if not llm.has_key():
+        raise HTTPException(409, llm.NO_KEY_MESSAGE)
+    _rescore.start(_run_rescore, payload.only_scored)
+    return {"started": True}
+
+
+@app.get("/api/jobs/rescore/status")
+def rescore_status() -> dict:
+    return _rescore.state
+
+
+@app.get("/api/jobs/rescore/estimate")
+def rescore_estimate(only_scored: bool = True) -> dict:
+    """How many jobs a rescore would touch. Shown before the button is pressed —
+    each one is a paid LLM call, so the cost shouldn't be a surprise."""
+    rows = db.all_jobs()
+    n = len([r for r in rows if r.get("fit_score") is not None]) if only_scored else len(rows)
+    return {"jobs": n, "calls": n, "tier": "cheap"}
 
 
 class JDUpdate(BaseModel):
@@ -246,6 +335,203 @@ async def upload_resume(job_id: int, file: UploadFile = File(...)) -> dict:
         raise HTTPException(400, "empty file")
     resume_id, version = db.save_uploaded_resume(job_id, data, ext)
     return {"resume_id": resume_id, "version": version, "source": "uploaded"}
+
+
+# --- Setup: everything the app needs to be yours ------------------------------
+# The whole point of this block is that none of it should require editing a file
+# by hand or restarting the server. That works only because llm/fitscore/tailor
+# resolve their config per call now instead of at import.
+
+@app.get("/api/settings")
+def get_settings() -> dict:
+    """Everything the Setup pane renders in one call, plus the flags that drive
+    the first-run banner. The API key itself is never returned — only whether one
+    is configured and a masked preview."""
+    s = settings.load()
+    profile = settings.get_profile()
+    fact_bank = settings.get_fact_bank()
+    return {
+        "key": settings.api_key_status(),
+        "preferences": s.preferences.model_dump(),
+        "rubric": s.rubric.model_dump(),
+        "email_sources": [e.model_dump() for e in s.email_sources],
+        "sources_configured": s.sources_configured,
+        # What ingest would query right now — the built-in fallback list when
+        # nothing is configured, so the pane can show what it is defaulting to.
+        "effective_sources": settings.sender_values(),
+        "gmail_ready": ingest.credentials_ready(),
+        "profile": {k: v for k, v in profile.items() if k != "content"},
+        "fact_bank": {k: v for k, v in fact_bank.items() if k != "content"},
+        # What the banner needs: anything true here means setup is incomplete.
+        "needs": {
+            "key": not settings.api_key_status()["configured"],
+            "profile": (not profile["exists"]) or profile["is_example"],
+            "fact_bank": (not fact_bank["exists"]) or fact_bank["is_example"],
+            "sources": not s.sources_configured,
+        },
+    }
+
+
+class KeyReq(BaseModel):
+    key: str
+
+
+@app.post("/api/settings/key")
+def set_key(payload: KeyReq) -> dict:
+    """Write the key to .env and drop llm.py's cached client."""
+    try:
+        settings.set_api_key(payload.key)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True, **settings.api_key_status()}
+
+
+@app.post("/api/settings/key/test")
+def test_key() -> dict:
+    """One cheap round-trip against the configured key. Finding out here beats
+    finding out three stages into a tailor run."""
+    try:
+        reply = llm.smoke_test()
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "reply": (reply or "").strip()[:80]}
+
+
+@app.put("/api/settings/preferences")
+def set_preferences(payload: JobPreferences) -> dict:
+    """What an ideal role looks like. FastAPI validates against the pydantic
+    model, so a bad value is a 422 with the offending field named."""
+    s = settings.load()
+    s.preferences = payload
+    settings.save(s)
+    return s.preferences.model_dump()
+
+
+@app.put("/api/settings/rubric")
+def set_rubric(payload: ScoringRubric) -> dict:
+    """How fit is judged. Saving does NOT rescore — that's an explicit, paid
+    action behind its own button."""
+    s = settings.load()
+    s.rubric = payload
+    settings.save(s)
+    return s.rubric.model_dump()
+
+
+@app.post("/api/settings/rubric/preview")
+def preview_rubric(payload: ScoringRubric) -> dict:
+    """The exact prompt the current sliders produce, without saving.
+
+    Sliders that silently rewrite a hidden prompt are a black box; this makes the
+    translation inspectable, which matters because the prompt is the actual
+    scoring logic.
+    """
+    return {"prompt": fitscore.build_rubric(settings.load().preferences, payload)}
+
+
+class DocReq(BaseModel):
+    content: str
+
+
+@app.get("/api/settings/profile")
+def get_profile_doc() -> dict:
+    return settings.get_profile()
+
+
+@app.put("/api/settings/profile")
+def set_profile_doc(payload: DocReq) -> dict:
+    return {"ok": True, "chars": settings.set_profile(payload.content)}
+
+
+@app.get("/api/settings/factbank")
+def get_factbank_doc() -> dict:
+    return settings.get_fact_bank()
+
+
+@app.put("/api/settings/factbank")
+def set_factbank_doc(payload: DocReq) -> dict:
+    return {"ok": True, "chars": settings.set_fact_bank(payload.content)}
+
+
+@app.post("/api/settings/factbank/extract")
+async def extract_factbank(file: UploadFile = File(...)) -> dict:
+    """Upload a resume, get fact-bank markdown BACK — this deliberately does not
+    save it.
+
+    The grounding check treats the fact bank as ground truth, so an LLM writing
+    that file unreviewed would let an extraction error certify itself as a
+    verified resume claim. The pane shows this in the editor and you press Save.
+    """
+    ext = Path(file.filename or "resume.docx").suffix.lower()
+    if ext not in (".docx", ".pdf"):
+        raise HTTPException(400, "upload a .docx or .pdf file")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "empty file")
+    if not llm.has_key():
+        raise HTTPException(409, llm.NO_KEY_MESSAGE)
+    try:
+        markdown = factbank.extract_from_upload(data, ext)
+    except ValueError as e:
+        raise HTTPException(400, str(e))          # unreadable/scanned file
+    return {"content": markdown, "saved": False}
+
+
+# --- Email sources ------------------------------------------------------------
+
+class SourcesReq(BaseModel):
+    sources: list[EmailSource]
+
+
+@app.get("/api/settings/senders")
+def get_senders() -> dict:
+    s = settings.load()
+    return {
+        "sources": [e.model_dump() for e in s.email_sources],
+        "configured": s.sources_configured,
+        # What ingest would actually query right now, defaults included.
+        "effective": settings.sender_values(),
+        "defaults": [e.model_dump() for e in settings.default_sources()],
+    }
+
+
+@app.put("/api/settings/senders")
+def put_senders(payload: SourcesReq) -> dict:
+    s = settings.set_sources(payload.sources)
+    return {"ok": True, "sources": [e.model_dump() for e in s.email_sources],
+            "effective": settings.sender_values()}
+
+
+class ScanReq(BaseModel):
+    days: int = 90
+
+
+def _run_scan(days: int) -> None:
+    found = ingest.discover_senders(query=f"category:updates newer_than:{days}d",
+                                    progress=_scan.state)
+    _scan.state.update(senders=found, message=f"found {len(found)} senders")
+
+
+@app.post("/api/settings/senders/scan")
+def start_scan(payload: ScanReq) -> dict:
+    """Sweep the inbox for anything that looks like a job-alert sender.
+
+    Not run automatically after auth: it makes one metadata call per message over
+    a wide window, so it is slow enough that doing it unasked would make a first
+    launch look hung. It stays a button press.
+    """
+    if _scan.running:
+        raise HTTPException(409, "a scan is already running")
+    if not ingest.credentials_ready():
+        raise HTTPException(409, "Gmail authorization needed — run `python -m pipeline` "
+                                 "once in your terminal to sign in, then try again.")
+    days = max(1, min(payload.days, 365))
+    _scan.start(_run_scan, days)
+    return {"started": True, "days": days}
+
+
+@app.get("/api/settings/senders/scan/status")
+def scan_status() -> dict:
+    return _scan.state
 
 
 # Serve the frontend LAST so it doesn't shadow the /api routes above. html=True

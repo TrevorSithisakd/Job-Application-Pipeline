@@ -29,11 +29,18 @@ from stages.render import render
 from stages.fillcheck import fit_to_one_page
 
 
-def _load_fact_bank() -> str:
-    """Fail loudly, mirroring fitscore._load_profile. Drafting a resume against
-    an empty fact bank produces a blank or fabricated document that looks fine,
-    so a missing fact bank must stop the run, not silently default to "".
+def fact_bank() -> str:
+    """The fact bank, read fresh on every call.
+
+    Fails loudly, mirroring fitscore.profile(). Drafting a resume against an
+    empty fact bank produces a blank or fabricated document that looks fine, so
+    a missing fact bank must stop the run, not silently default to "".
     (The old relative-path read did exactly that when run from another cwd.)
+
+    Read per call, not cached at import: the Setup pane edits this file at
+    runtime, and a cached copy would keep drafting against the old version until
+    you restarted. It also means importing this module no longer requires the
+    file to exist — which is what broke `pytest` on a fresh clone.
     """
     if not FACT_BANK_FILE.exists():
         raise FileNotFoundError(
@@ -41,9 +48,6 @@ def _load_fact_bank() -> str:
             "empty fact bank would be blank or fabricated."
         )
     return FACT_BANK_FILE.read_text(encoding="utf-8")
-
-
-FACT_BANK = _load_fact_bank()
 
 # Generated from the model so the prompt can never drift from what validation
 # demands (same discipline as the extract stage).
@@ -102,7 +106,7 @@ class TailorResult:
 def draft_structured(job: Job) -> ResumeDraft:
     """LLM -> validated ResumeDraft. Quality tier for prose; temp 0.3 for a
     little warmth (structure still holds via json_mode + validation + retry)."""
-    user = f"FACT BANK:\n{FACT_BANK}\n\nJOB:\n{job.model_dump_json(indent=2)}"
+    user = f"FACT BANK:\n{fact_bank()}\n\nJOB:\n{job.model_dump_json(indent=2)}"
     return call_structured(SYSTEM, user, schema=ResumeDraft,
                            tier="quality", temperature=0.3)
 
@@ -152,7 +156,7 @@ def check_grounding(draft: ResumeDraft) -> GroundingResult:
     claims by index; any claim the checker skips is conservatively flagged."""
     claims = _collect_claims(draft)
     numbered = "\n".join(f"{i}. {c}" for i, c in enumerate(claims))
-    user = f"FACT BANK:\n{FACT_BANK}\n\nCLAIMS:\n{numbered}"
+    user = f"FACT BANK:\n{fact_bank()}\n\nCLAIMS:\n{numbered}"
     report: GroundingReport = call_structured(
         GROUNDING_SYSTEM, user, schema=GroundingReport,
         tier=GROUNDING_TIER, temperature=0.0)
