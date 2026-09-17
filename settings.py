@@ -28,7 +28,8 @@ import os
 import re
 from pathlib import Path
 
-from paths import ENV_FILE, FACT_BANK_FILE, PROFILE_FILE, ROOT
+import paths
+from paths import FACT_BANK_FILE, PROFILE_FILE, ROOT
 from schemas import AppSettings, EmailSource
 
 SETTINGS_FILE = ROOT / "data" / "settings.json"
@@ -92,8 +93,8 @@ def set_api_key(key: str) -> None:
     if not key:
         raise ValueError("API key is empty.")
 
-    lines = (ENV_FILE.read_text(encoding="utf-8").splitlines()
-             if ENV_FILE.exists() else [])
+    lines = (paths.ENV_FILE.read_text(encoding="utf-8").splitlines()
+             if paths.ENV_FILE.exists() else [])
     new_line = f"{KEY_NAME}={key}"
     replaced = False
     for i, line in enumerate(lines):
@@ -104,7 +105,7 @@ def set_api_key(key: str) -> None:
     if not replaced:
         lines.append(new_line)
 
-    ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    paths.ENV_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.environ[KEY_NAME] = key
 
     # Drop llm.py's cached client so the next call uses the key just written.
@@ -129,12 +130,12 @@ def api_key_status() -> dict:
         return {"configured": False, "masked": "", "source": None}
 
     in_env_file = False
-    if ENV_FILE.exists():
+    if paths.ENV_FILE.exists():
         in_env_file = any(_KEY_LINE.match(ln)
-                          for ln in ENV_FILE.read_text(encoding="utf-8").splitlines())
+                          for ln in paths.ENV_FILE.read_text(encoding="utf-8").splitlines())
     # An env var set outside the file wins; say which one is actually live.
     from dotenv import dotenv_values
-    file_val = dotenv_values(ENV_FILE).get(KEY_NAME) if ENV_FILE.exists() else None
+    file_val = dotenv_values(paths.ENV_FILE).get(KEY_NAME) if paths.ENV_FILE.exists() else None
     source = "env-file" if (in_env_file and file_val == key) else "environment"
 
     masked = f"{key[:6]}…{key[-4:]}" if len(key) > 12 else "set"
