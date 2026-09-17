@@ -13,6 +13,7 @@ env/
 # Personal data
 data/profile.md
 data/fact_bank.md
+data/settings.json
 data/resumes/
 debug_out/
 HANDOFF.md

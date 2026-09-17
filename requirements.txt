@@ -2,8 +2,9 @@
 pydantic>=2
 openai>=1.0          # client for DeepSeek's OpenAI-compatible API
 python-dotenv        # loads secrets from .env
-python-docx          # render.py builds the .docx resume
+python-docx          # render.py builds the .docx resume; factbank.py reads uploads
 python-multipart     # FastAPI file uploads (upload-resume endpoint)
+pypdf                # stages/factbank.py reads an uploaded .pdf resume
 
 # Web app
 fastapi

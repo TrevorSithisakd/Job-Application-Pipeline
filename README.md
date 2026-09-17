@@ -16,8 +16,9 @@ never leave it — none of that is in this repository (see [Privacy](#privacy)).
 - **Ingest** job-alert emails from Gmail (LinkedIn / SEEK / Indeed / Greenhouse).
 - **Extract** *every* posting from an email — alert digests list many jobs — into
   validated records.
-- **Fit-score** each role against your profile (0–100 + rationale + missing
-  keywords + a track: ml-engineer / data-scientist / data-analyst).
+- **Fit-score** each role against your profile and your stated preferences
+  (0–100 + rationale + missing keywords + a track). The weights, score bands, and
+  track names are yours to set in Setup.
 - **Tailor** a resume for a role using only facts from your fact bank (RAG-style),
   then **grounding-check** every claim against that fact bank — an unsupported
   claim (e.g. "fine-tuned" when you only "used" a model) is flagged and blocks
@@ -28,6 +29,10 @@ never leave it — none of that is in this repository (see [Privacy](#privacy)).
   interested → applied → interviewing → offer → rejected), a table, a job detail
   view, manual role entry, uploading an existing resume, quick job delete, and a
   "run ingest" button.
+- **Configure** all of it from a **Setup** page in the browser — API key, your
+  profile and fact bank (buildable from a resume you already have), what an ideal
+  role looks like, how fit is scored, and which senders to scrape. No file
+  editing, no restart.
 
 ## How it works
 
@@ -65,26 +70,56 @@ python -m venv job_pipe_env
 # Windows:  job_pipe_env\Scripts\activate
 # macOS/Linux:  source job_pipe_env/bin/activate
 pip install -r requirements.txt
+
+python run_app.py           # or double-click givemeajob.bat (Windows)
 ```
 
-### 1. LLM key
-```bash
-cp .env.example .env        # then edit .env and paste your key
-# DEEPSEEK_API_KEY=sk-...
-```
+The app starts **without any configuration** and opens on a board with a
+**Finish setup** banner. Everything below is done in the browser, under **Setup**
+in the top nav — nothing needs a file editor or a restart.
+
+### 1. API key
+Paste your [DeepSeek key](https://platform.deepseek.com/api_keys) into the
+**API key** pane and press **Test key** to confirm it works before spending a
+real run finding out it doesn't. It's written to `.env`, which is gitignored. A
+real `DEEPSEEK_API_KEY` environment variable still takes priority (that's what
+the cloud deploy uses).
 
 ### 2. Your profile and fact bank (required)
-The app fails loudly without these — by design, so it never scores or drafts
-against nothing.
-```bash
-cp data/profile.example.md    data/profile.md
-cp data/fact_bank.example.md  data/fact_bank.md
-```
-Fill both with your **real, verifiable** details. The fact bank is the *only*
-source the resume writer may use, and the grounding check rejects anything not in
-it — so keep it truthful and specific.
+Under **Profile & fact bank**:
+- **Profile** — a short summary of you. This is what fit scoring judges roles against.
+- **Fact bank** — the *only* source the resume writer may draw on. **Upload a
+  `.docx`/`.pdf` resume** and it's turned into a fact bank for you; it's shown in
+  the editor **for review** and saved only when you press Save. Anything the
+  resume was vague about comes back marked `(verify)`.
 
-### 3. Gmail access
+Both start as a demo persona, and the pane says so until you replace them — a fit
+score against someone else's CV looks completely normal while meaning nothing.
+Keep the fact bank truthful and specific: the grounding check rejects any resume
+claim that isn't in it.
+
+*(Prefer the terminal? `cp data/profile.example.md data/profile.md` and
+`cp data/fact_bank.example.md data/fact_bank.md` still work — the Setup pane
+reads and writes those same two files.)*
+
+### 3. What an ideal job looks like, and how fit is judged
+- **Ideal job** — target titles, locations, remote policy, seniority, salary
+  floor, must-haves, nice-to-haves, dealbreakers, and your own track names.
+- **Fit criteria** — a weight per scoring dimension, the score bands (what 80+
+  *means*), and a free-text box for anything else. **Preview the prompt** shows
+  the exact text your sliders generate, and **Rescore the board** re-applies
+  changed criteria to roles already scored.
+
+### 4. Which emails to scrape
+Under **Email sources**, **Scan inbox** sweeps your Updates tab and lists every
+sender it finds, with the job boards already ticked and a sample subject line
+under each as evidence. Tick what you want, add anything it missed by hand, and
+Save. Until you do, ingest falls back to the built-in job-board list, so it
+behaves exactly as it did before.
+
+The scan needs Gmail authorised first (step 5).
+
+### 5. Gmail access
 1. In the [Google Cloud Console](https://console.cloud.google.com/): create a
    project, enable the **Gmail API**, and create an **OAuth client ID** of type
    **Desktop app**.
@@ -114,7 +149,9 @@ Opens `http://127.0.0.1:8000`. From there you can:
   **Download .docx**;
 - **Upload** an existing `.docx`/`.pdf` resume to a role (kept as an "uploaded" version);
 - **Add a role manually**, **quick-delete** a role (× on any card/row), or
-  **run ingest** for a chosen window right from the toolbar.
+  **run ingest** for a chosen window right from the toolbar;
+- open **Setup** to change your key, profile, fact bank, ideal-job preferences,
+  scoring criteria, or email sources — all without restarting.
 
 ### Tests
 ```bash
@@ -133,7 +170,10 @@ demo persona and a few sample jobs automatically, so nothing personal is require
 1. Push this repo to GitHub.
 2. Render → **New → Web Service** → connect the repo. It detects the `Dockerfile`.
 3. Environment variables:
-   - `DEEPSEEK_API_KEY` — **required** (the app won't start without it).
+   - `DEEPSEEK_API_KEY` — the app now boots without it and shows the Setup page,
+     but set it here anyway: on an ephemeral free tier a key entered in the UI is
+     written to `.env` and lost on the next restart, while an env var survives.
+     An env var also takes priority over anything Setup writes.
    - *(optional)* `FACT_BANK_MD` / `PROFILE_MD` — paste your **real** fact bank /
      profile content to tailor authentic resumes in the demo. Omit to use the demo
      persona. This keeps your personal data out of the public repo.
@@ -154,15 +194,17 @@ demo persona and a few sample jobs automatically, so nothing personal is require
 | `schemas.py` | Pydantic contracts for every LLM output |
 | `llm.py` | One inference wrapper: model tiers, retries, JSON repair |
 | `db.py` | SQLite: jobs / resumes, dedup, migrations |
-| `stages/ingest.py` | Gmail → cleaned email bodies |
+| `stages/ingest.py` | Gmail → cleaned email bodies; inbox sender discovery |
 | `stages/extract.py` | email → list of `Job`s (digests → many) |
-| `stages/fitscore.py` | Job + profile → fit score |
+| `stages/fitscore.py` | Job + profile → fit score; builds the rubric from settings |
 | `stages/tailor.py` | Job + fact bank → draft + grounding check + one-page fit |
 | `stages/render.py` | `ResumeDraft` → styled one-page `.docx` (deterministic) |
 | `stages/fillcheck.py` | One-page fit: estimate height, tighten/trim to one page |
+| `stages/factbank.py` | Uploaded resume → fact-bank markdown (for your review) |
+| `settings.py` | Runtime config: API key (`.env`) + `data/settings.json` |
 | `pipeline.py` | Orchestrator — one command |
 | `api.py` | FastAPI: JSON API + serves the frontend |
-| `frontend/` | The web UI (no build step) |
+| `frontend/` | The web UI, incl. the Setup pane (no build step) |
 | `run_app.py` / `givemeajob.bat` | One-click launcher |
 | `seed.py` | Boot helper: demo data + example/env fallback (for cloud deploys) |
 | `Dockerfile` / `.dockerignore` | Container build for Render/Railway/Fly/HF Spaces |
@@ -178,6 +220,9 @@ contains only code and the example templates.
 ## Notes & limits
 
 - **Local, single-user.** No auth, meant to run on your own machine at localhost.
+- **Sender discovery** is in Setup → Email sources (it used to mean running
+  `python -m stages.ingest audit` and reading the output by eye — that still
+  works, and now prints a `JOB?` marker beside the likely ones).
 - **Alert emails are teasers.** The full JD lives behind each posting's link;
   paste it into the job before tailoring (scraping is deliberately avoided to
   respect the job boards' terms).

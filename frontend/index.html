@@ -24,12 +24,25 @@
 
 <script>
 const STATUSES = ["interested", "applied", "interviewing", "offer", "rejected"];
-const APP = { view: "board", boardView: "board", jobs: [], stats: {}, job: null, resume: null, rtab: "preview", query: "", tailoring: false, tailorStage: "", ingestDays: 3, ingesting: false, ingestMsg: "" };
+const APP = { view: "board", boardView: "board", jobs: [], stats: {}, job: null, resume: null, rtab: "preview", query: "", tailoring: false, tailorStage: "", ingestDays: 3, ingesting: false, ingestMsg: "",
+  // Setup pane. `setup` is the whole /api/settings blob; null until first loaded.
+  setup: null, setupTab: "key", setupBusy: "", scan: { running: false, senders: [], msg: "", show: "likely" },
+  rescoring: false, rescoreMsg: "",
+  // Score bands, overwritten from the saved rubric once settings load. The board
+  // colours jobs by these, so "strong match" means the same thing in the UI as it
+  // does in the scoring prompt — otherwise raising strong_min to 85 would leave
+  // the board still painting 75s as strong.
+  bands: { strong: 75, possible: 50 } };
 
 const $ = (id) => document.getElementById(id);
+const val = (id) => ($(id) ? $(id).value.trim() : "");
+// "a, b , c" -> ["a","b","c"]. Comma-separated text inputs are the lightest way to
+// edit a short list without building a tag widget.
+const listVal = (id) => val(id).split(",").map(s => s.trim()).filter(Boolean);
 const esc = (s) => (s ?? "").toString().replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const api = async (path, opts) => { const r = await fetch(path, opts); if (!r.ok) throw new Error(await r.text()); return r.status === 204 ? null : r.json(); };
-const scoreColor = (f) => f == null ? "var(--color-neutral-500)" : f >= 75 ? "var(--color-accent)" : f >= 50 ? "var(--color-neutral-900)" : "var(--color-neutral-600)";
+const jsonReq = (method, body) => ({ method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+const scoreColor = (f) => f == null ? "var(--color-neutral-500)" : f >= APP.bands.strong ? "var(--color-accent)" : f >= APP.bands.possible ? "var(--color-neutral-900)" : "var(--color-neutral-600)";
 const scoreLabel = (f) => f == null ? "–" : f;
 
 function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add("show"); setTimeout(() => t.classList.remove("show"), 2800); }
@@ -45,7 +58,19 @@ async function openJob(id) {
   APP.rtab = "preview"; APP.view = "job"; render();
 }
 async function selectResume(rid) { APP.resume = await api(`/api/resumes/${rid}`); APP.rtab = "preview"; render(); }
-function go(view) { APP.view = view; render(); if (view === "board") loadBoard(); }
+function go(view) { APP.view = view; render(); if (view === "board") loadBoard(); if (view === "setup") loadSetup(); }
+
+// Settings drive the first-run banner and the board's score colours, so they are
+// fetched on boot, not only when the Setup pane is opened.
+async function loadSetup(rerender = true) {
+  APP.setup = await api("/api/settings");
+  APP.bands = { strong: APP.setup.rubric.strong_min, possible: APP.setup.rubric.possible_min };
+  if (rerender) render();
+}
+function setupIncomplete() {
+  const n = APP.setup && APP.setup.needs;
+  return n ? Object.keys(n).filter(k => n[k]) : [];
+}
 
 // --- actions ----------------------------------------------------------------
 async function setStatus(id, status) {
@@ -137,21 +162,50 @@ function pickUpload(jobId) {
 function render() {
   if (APP.view === "job") $("app").innerHTML = header() + viewJob();
   else if (APP.view === "add") $("app").innerHTML = header() + viewAdd();
-  else $("app").innerHTML = header() + viewBoard();
+  else if (APP.view === "setup") { $("app").innerHTML = header() + viewSetup(); hydrateDocs(); }
+  else $("app").innerHTML = header() + banner() + viewBoard();
   if (APP.view === "board" && APP.boardView === "board") wireDrag();
+  if (APP.view === "setup" && APP.setupTab === "rubric") syncWeights();
 }
 
 function header() {
+  const todo = setupIncomplete().length;
   return `<div class="nav" style="position:sticky;top:0;z-index:20;background:var(--color-bg)">
     <div class="nav-brand">JOB&nbsp;PIPELINE</div>
     <div style="display:flex;gap:14px;margin-right:auto">
       <button class="btn btn-ghost" style="text-transform:uppercase;font-size:13px;letter-spacing:.06em" onclick="go('board')">Board</button>
       <button class="btn btn-ghost" style="text-transform:uppercase;font-size:13px;letter-spacing:.06em" onclick="go('add')">Add role</button>
+      <button class="btn btn-ghost" style="text-transform:uppercase;font-size:13px;letter-spacing:.06em" onclick="go('setup')">Setup${todo ? ` <span class="tag tag-accent" style="margin-left:6px">${todo}</span>` : ""}</button>
     </div>
     <div style="display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-neutral-700)">
       <span style="width:7px;height:7px;background:var(--color-accent);display:block"></span>
       <span>api :8000 · ${APP.stats.jobs ?? "–"} roles</span>
     </div>
+  </div>`;
+}
+
+// First-run banner. Named rather than counted, because "set your API key" and
+// "you're still on the demo fact bank" need completely different reactions — the
+// second one silently produces plausible resumes for a person who doesn't exist.
+const NEEDS_COPY = {
+  key: ["No API key", "Nothing can score or draft until DeepSeek has a key."],
+  profile: ["Profile is the demo persona", "Fit scores are being judged against someone else's CV."],
+  fact_bank: ["Fact bank is the demo persona", "Tailored resumes would be grounded in facts that aren't yours."],
+  sources: ["No email sources chosen", "Ingest falls back to the built-in job-board list."],
+};
+
+function banner() {
+  const needs = setupIncomplete();
+  if (!needs.length) return "";
+  return `<div style="border-bottom:2px solid var(--color-accent);background:var(--color-accent-100);padding:14px 20px">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <span style="font-family:var(--font-heading);font-weight:800;font-size:14px">Finish setup</span>
+      <span style="font-size:12.5px;color:var(--color-neutral-800)">${needs.length} item${needs.length > 1 ? "s" : ""} left before this app is really yours.</span>
+      <button class="btn btn-primary" style="margin-left:auto" onclick="go('setup')">Open Setup</button>
+    </div>
+    <ul style="margin:8px 0 0;padding-left:18px;font-size:12.5px;color:var(--color-neutral-800)">
+      ${needs.map(k => `<li><strong>${esc(NEEDS_COPY[k][0])}</strong> — ${esc(NEEDS_COPY[k][1])}</li>`).join("")}
+    </ul>
   </div>`;
 }
 
@@ -473,7 +527,485 @@ function viewAdd() {
   </div>`;
 }
 
-loadBoard();
+// --- Setup ------------------------------------------------------------------
+// Panes render once per tab switch and read their values back off the DOM on
+// Save (the same approach viewAdd() uses). A re-render per keystroke would steal
+// focus from whatever field you were typing in — the bug filterList() works
+// around on the board.
+
+const SETUP_TABS = [
+  ["key", "API key"],
+  ["profile", "Profile & fact bank"],
+  ["prefs", "Ideal job"],
+  ["rubric", "Fit criteria"],
+  ["sources", "Email sources"],
+];
+
+function setupTab(t) { APP.setupTab = t; render(); }
+
+function paneHead(title, blurb) {
+  return `<div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--color-accent)">Setup</div>
+    <h2 style="margin:6px 0 4px">${esc(title)}</h2>
+    <div style="font-size:13.5px;color:var(--color-neutral-800);max-width:75ch">${blurb}</div>
+    <hr class="hr">`;
+}
+
+// Which "needs" flag lights the dot on each tab.
+const TAB_NEEDS = { key: ["key"], profile: ["profile", "fact_bank"], prefs: [], rubric: [], sources: ["sources"] };
+
+function viewSetup() {
+  if (!APP.setup) return `<div style="padding:40px 20px;color:var(--color-neutral-700)">Loading settings…</div>`;
+  const needs = APP.setup.needs;
+  const dot = `<span style="width:6px;height:6px;background:var(--color-accent);display:inline-block;margin-left:7px;vertical-align:middle"></span>`;
+
+  const tabs = `<div style="display:flex;gap:2px;padding:0 20px;border-bottom:2px solid var(--color-divider);flex-wrap:wrap">
+    ${SETUP_TABS.map(([k, label]) => `<button class="btn" style="border:0;border-bottom:3px solid ${APP.setupTab === k ? "var(--color-accent)" : "transparent"};border-radius:0;font-size:13px;padding:12px 14px;font-weight:${APP.setupTab === k ? "700" : "400"}" onclick="setupTab('${k}')">${esc(label)}${TAB_NEEDS[k].some(n => needs[n]) ? dot : ""}</button>`).join("")}
+  </div>`;
+
+  const panes = { key: paneKey, profile: paneProfile, prefs: panePrefs, rubric: paneRubric, sources: paneSources };
+  return tabs + `<div style="max-width:1000px;padding:26px 20px 90px">${panes[APP.setupTab]()}</div>`;
+}
+
+// --- pane: API key ---
+function paneKey() {
+  const k = APP.setup.key;
+  const status = k.configured
+    ? `<span class="tag tag-outline">configured</span> <span style="font-family:monospace;font-size:12.5px">${esc(k.masked)}</span>
+       <span style="font-size:12px;color:var(--color-neutral-700)">from ${k.source === "env-file" ? ".env" : "an environment variable"}</span>`
+    : `<span class="tag tag-accent">not set</span>`;
+  // When the live key comes from a real environment variable, writing .env will
+  // not change what the app uses (load_dotenv never overrides one). Saying so
+  // beats letting someone save repeatedly and wonder why nothing changes.
+  const envWarning = k.source === "environment"
+    ? `<div style="margin-top:10px;padding:10px 12px;background:var(--color-neutral-100);font-size:12.5px;border-left:3px solid var(--color-accent)">
+         The key in use comes from an environment variable, which takes priority over <code>.env</code>.
+         Saving here writes <code>.env</code>, but the environment variable will keep winning until it is unset.
+       </div>` : "";
+  return paneHead("DeepSeek API key",
+    `Every stage calls one provider. The key is written to <code>.env</code> in the project root, which is gitignored, so it never enters the repo. A real environment variable still takes priority.`)
+    + `<div style="margin-bottom:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">${status}</div>
+    ${envWarning}
+    <div class="field" style="max-width:520px;margin-top:16px"><label>API key</label>
+      <input id="s_key" class="input" type="password" placeholder="sk-…" autocomplete="off">
+    </div>
+    <div style="font-size:12px;color:var(--color-neutral-700);margin-top:6px">Get one at <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noopener">platform.deepseek.com/api_keys</a></div>
+    <hr class="hr">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="saveKey()">Save key</button>
+      <button class="btn btn-secondary" onclick="testKey()" ${k.configured ? "" : "disabled"}>Test key</button>
+      <span id="keyresult" style="font-size:12.5px;color:var(--color-neutral-700)"></span>
+    </div>`;
+}
+
+async function saveKey() {
+  const key = val("s_key");
+  if (!key) return toast("Paste a key first.");
+  try {
+    await api("/api/settings/key", jsonReq("POST", { key }));
+    await loadSetup(false); toast("Key saved."); render();
+  } catch (e) { toast("Could not save key."); }
+}
+
+async function testKey() {
+  const el = $("keyresult"); el.textContent = "testing…";
+  try {
+    const r = await api("/api/settings/key/test", { method: "POST" });
+    el.textContent = r.ok ? `✓ key works — model replied "${r.reply}"` : `✗ ${r.error}`;
+    el.style.color = r.ok ? "var(--color-accent)" : "var(--color-neutral-800)";
+  } catch (e) { el.textContent = "✗ request failed"; }
+}
+
+// --- pane: profile + fact bank ---
+const DOC_FIELD = { profile: "s_profile", factbank: "s_factbank" };
+
+function paneProfile() {
+  const p = APP.setup.profile, f = APP.setup.fact_bank;
+  const flag = (d) => !d.exists ? `<span class="tag tag-accent">missing</span>`
+    : d.is_example ? `<span class="tag tag-accent">still the example</span>`
+    : `<span class="tag tag-outline">yours</span>`;
+  return paneHead("Profile and fact bank",
+    `Two files, two jobs. The <strong>profile</strong> is what fit scoring judges you against. The <strong>fact bank</strong> is the only source the resume writer may draw on, and the grounding check rejects any claim that is not in it, so keep it truthful and specific.`)
+    + `<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><h3 style="margin:0;font-size:15px">Profile</h3>${flag(p)}
+       <button class="btn btn-secondary" style="margin-left:auto;font-size:12px;padding:5px 10px" onclick="loadDoc('profile')">Reload</button></div>
+    <textarea id="s_profile" class="input" style="min-height:200px;font-size:13px;line-height:1.55" placeholder="Loading…"></textarea>
+    <div style="margin-top:10px"><button class="btn btn-primary" onclick="saveDoc('profile')">Save profile</button></div>
+    <hr class="hr">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px"><h3 style="margin:0;font-size:15px">Fact bank</h3>${flag(f)}
+       <button class="btn btn-secondary" style="margin-left:auto;font-size:12px;padding:5px 10px" onclick="loadDoc('factbank')">Reload</button></div>
+    <div style="padding:12px;background:var(--color-neutral-100);margin-bottom:12px">
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px">Build it from a resume you already have</div>
+      <div style="font-size:12.5px;color:var(--color-neutral-800);margin-bottom:10px">Upload a <code>.docx</code> or <code>.pdf</code>. It is read, turned into a fact bank, and shown below <strong>for you to review</strong>. Nothing is saved until you press Save. Anything the resume was vague about comes back marked <code>(verify)</code>.</div>
+      <button class="btn btn-secondary" onclick="pickFactBank()" ${APP.setupBusy ? "disabled" : ""}>${APP.setupBusy === "extract" ? "Reading resume…" : "Upload a resume"}</button>
+    </div>
+    <textarea id="s_factbank" class="input" style="min-height:280px;font-size:13px;line-height:1.55" placeholder="Loading…"></textarea>
+    <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="saveDoc('factbank')">Save fact bank</button>
+      <span style="font-size:12px;color:var(--color-neutral-700)">Review every line before saving. The grounding check treats this as ground truth.</span>
+    </div>`;
+}
+
+async function loadDoc(which) {
+  const d = await api(`/api/settings/${which}`);
+  const el = $(DOC_FIELD[which]); if (el) el.value = d.content || "";
+}
+
+// Both textareas are filled after the pane paints, so opening Setup never shows
+// an empty box that looks like an empty file.
+//
+// ONLY fills a box that is currently empty. render() runs on every save and on
+// the upload flow, and these loads are async — without the guard a fetch started
+// before a re-render would land afterwards and overwrite whatever you had just
+// typed or just extracted.
+function hydrateDocs() {
+  if (APP.view !== "setup" || APP.setupTab !== "profile") return;
+  ["profile", "factbank"].forEach(which => {
+    const el = $(DOC_FIELD[which]);
+    if (el && !el.value) loadDoc(which).catch(() => {});
+  });
+}
+
+async function saveDoc(which) {
+  const el = $(DOC_FIELD[which]); if (!el) return;
+  const mine = el.value;
+  const other = which === "profile" ? "factbank" : "profile";
+  const theirs = $(DOC_FIELD[other]) ? $(DOC_FIELD[other]).value : null;
+  const d = await api(`/api/settings/${which}`, jsonReq("PUT", { content: mine }));
+  await loadSetup(false);
+  toast(`Saved (${d.chars} chars).`);
+  render();
+  // Restore both textareas: re-rendering refreshes the "still the example" flag,
+  // and a blind hydrate would throw away an unsaved edit in the other box.
+  if ($(DOC_FIELD[which])) $(DOC_FIELD[which]).value = mine;
+  if (theirs !== null && $(DOC_FIELD[other])) $(DOC_FIELD[other]).value = theirs;
+}
+
+function pickFactBank() {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = ".docx,.pdf";
+  inp.onchange = async () => {
+    const file = inp.files[0]; if (!file) return;
+    const keepProfile = $("s_profile") ? $("s_profile").value : null;
+    APP.setupBusy = "extract"; render();
+    if (keepProfile !== null && $("s_profile")) $("s_profile").value = keepProfile;
+    try {
+      const fd = new FormData(); fd.append("file", file);
+      const res = await fetch("/api/settings/factbank/extract", { method: "POST", body: fd });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "extraction failed");
+      APP.setupBusy = ""; render();
+      if (keepProfile !== null && $("s_profile")) $("s_profile").value = keepProfile;
+      const el = $("s_factbank");
+      if (el) { el.value = body.content; el.focus(); el.setSelectionRange(0, 0); el.scrollIntoView({ block: "center" }); }
+      toast("Extracted — review it, then press Save.");
+    } catch (e) {
+      APP.setupBusy = ""; render();
+      toast(String(e.message || e).slice(0, 140));
+    }
+  };
+  inp.click();
+}
+
+// --- pane: ideal job ---
+function panePrefs() {
+  const p = APP.setup.preferences;
+  const F = [
+    ["target_titles", "Target titles", "Machine Learning Engineer, Data Scientist"],
+    ["locations", "Preferred locations", "Sydney, Remote AU"],
+    ["seniority", "Target seniority", "graduate, junior"],
+    ["must_have_skills", "Must-have skills", "Python, SQL"],
+    ["nice_to_have_skills", "Nice-to-have skills", "PyTorch, AWS"],
+    ["dealbreakers", "Dealbreakers", "requires security clearance, unpaid"],
+    ["tracks", "Tracks to classify into", "ml-engineer, data-scientist, data-analyst"],
+  ];
+  const remote = ["any", "remote", "hybrid", "onsite"];
+  return paneHead("What an ideal job looks like",
+    `These go into the fit-scoring prompt. They used to be one hardcoded line reading "location (Sydney/remote-AU)", so anyone not in Sydney was quietly mis-scored. Comma-separate each list; leave a field empty to drop it from the prompt entirely.`)
+    + `<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px 24px">
+      ${F.map(([k, label, ph]) => `<div class="field"><label>${esc(label)}</label>
+        <input id="p_${k}" class="input" placeholder="${esc(ph)}" value="${esc((p[k] || []).join(", "))}"></div>`).join("")}
+      <div class="field"><label>Salary floor</label>
+        <input id="p_salary_floor" class="input" type="number" min="0" placeholder="110000" value="${p.salary_floor ?? ""}"></div>
+      <div class="field"><label>Currency</label>
+        <input id="p_salary_currency" class="input" placeholder="AUD" value="${esc(p.salary_currency || "AUD")}"></div>
+      <div class="field" style="grid-column:span 2"><label>Work arrangement</label>
+        <div class="seg">${remote.map(r => `<label class="seg-opt"><input type="radio" name="rp" value="${r}" ${p.remote_policy === r ? "checked" : ""}><span>${r}</span></label>`).join("")}</div>
+      </div>
+    </div>
+    <hr class="hr">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="savePrefs()">Save preferences</button>
+      <span style="font-size:12px;color:var(--color-neutral-700);margin-left:auto">Applies to new scores. Use Rescore under Fit criteria to re-apply to the board.</span>
+    </div>`;
+}
+
+async function savePrefs() {
+  const sel = document.querySelector('input[name="rp"]:checked');
+  const body = {
+    target_titles: listVal("p_target_titles"), locations: listVal("p_locations"),
+    seniority: listVal("p_seniority"), must_have_skills: listVal("p_must_have_skills"),
+    nice_to_have_skills: listVal("p_nice_to_have_skills"), dealbreakers: listVal("p_dealbreakers"),
+    tracks: listVal("p_tracks"),
+    salary_floor: val("p_salary_floor") ? Number(val("p_salary_floor")) : null,
+    salary_currency: val("p_salary_currency") || "AUD",
+    remote_policy: sel ? sel.value : "any",
+  };
+  try { await api("/api/settings/preferences", jsonReq("PUT", body)); await loadSetup(false); toast("Preferences saved."); }
+  catch (e) { toast("Could not save — check the fields."); }
+}
+
+// --- pane: fit criteria ---
+function paneRubric() {
+  const r = APP.setup.rubric;
+  return paneHead("How fit is judged",
+    `Weights are normalised and written into the scoring prompt as percentages. The bands are calibration anchors: they are what keeps a 70 meaning roughly the same thing across different roles. The board colours jobs by these thresholds too.`)
+    + `<h3 style="margin:0 0 10px;font-size:15px">Weights</h3>
+    <div id="weights">${r.dimensions.map(d => `
+      <div style="display:flex;align-items:center;gap:14px;padding:9px 0;border-bottom:1px solid var(--color-divider)">
+        <span style="flex:0 0 220px;font-size:13.5px">${esc(d.label)}</span>
+        <input type="range" min="0" max="100" value="${d.weight}" data-key="${esc(d.key)}" data-label="${esc(d.label)}"
+               class="wslider" style="flex:1;accent-color:var(--color-accent)" oninput="syncWeights()">
+        <span class="wpct" style="flex:0 0 70px;text-align:right;font-size:12.5px;color:var(--color-neutral-700)"></span>
+      </div>`).join("")}
+    </div>
+    <div style="font-size:12px;color:var(--color-neutral-700);margin-top:8px">Set a weight to 0 to drop that factor from the prompt entirely.</div>
+    <hr class="hr">
+    <h3 style="margin:0 0 10px;font-size:15px">Score bands</h3>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px 24px">
+      <div class="field"><label>Strong match — at or above</label><input id="r_strong" class="input" type="number" min="1" max="100" value="${r.strong_min}"></div>
+      <div class="field"><label>Worth considering — at or above</label><input id="r_possible" class="input" type="number" min="0" max="99" value="${r.possible_min}"></div>
+      <div class="field" style="grid-column:span 2"><label>What those bands mean to you (optional)</label>
+        <textarea id="r_notes" class="input" style="min-height:70px;font-size:13px">${esc(r.band_notes)}</textarea></div>
+      <div class="field" style="grid-column:span 2"><label>Additional criteria — free text, appended to the prompt</label>
+        <textarea id="r_extra" class="input" style="min-height:90px;font-size:13px" placeholder="e.g. Prefer teams that ship models to production. Penalise pure consultancies.">${esc(r.extra_criteria)}</textarea></div>
+    </div>
+    <hr class="hr">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="saveRubric()">Save criteria</button>
+      <button class="btn btn-secondary" onclick="previewRubric()">Preview the prompt</button>
+      <button class="btn btn-secondary" onclick="resetRubric()">Reset to defaults</button>
+      <span id="rescoreline" style="font-size:12.5px;color:var(--color-neutral-700);margin-left:auto">${APP.rescoring ? "▸ " + esc(APP.rescoreMsg) : ""}</span>
+      <button class="btn btn-secondary" onclick="runRescore()" ${APP.rescoring ? "disabled" : ""}>${APP.rescoring ? "Rescoring…" : "Rescore the board"}</button>
+    </div>
+    <pre id="rubricpreview" style="display:none;margin-top:18px;padding:14px;background:var(--color-neutral-100);font-size:12px;line-height:1.5;white-space:pre-wrap;max-height:420px;overflow:auto"></pre>`;
+}
+
+// Live percentages without a re-render — a full render() here would drop the
+// slider mid-drag.
+function syncWeights() {
+  const sliders = [...document.querySelectorAll(".wslider")];
+  const total = sliders.reduce((a, s) => a + Number(s.value), 0);
+  const pcts = document.querySelectorAll(".wpct");
+  sliders.forEach((s, i) => {
+    const v = Number(s.value);
+    pcts[i].textContent = v === 0 ? "ignored" : total ? `${Math.round(v * 100 / total)}%` : "–";
+  });
+}
+
+function readRubric() {
+  return {
+    dimensions: [...document.querySelectorAll(".wslider")].map(s => ({
+      key: s.dataset.key, label: s.dataset.label, weight: Number(s.value) })),
+    strong_min: Number(val("r_strong")), possible_min: Number(val("r_possible")),
+    band_notes: $("r_notes").value, extra_criteria: $("r_extra").value,
+  };
+}
+
+async function saveRubric() {
+  try {
+    await api("/api/settings/rubric", jsonReq("PUT", readRubric()));
+    await loadSetup(false); toast("Criteria saved."); render();
+  } catch (e) {
+    toast("Rejected — 'worth considering' must be below 'strong match'.");
+  }
+}
+
+async function previewRubric() {
+  const pre = $("rubricpreview");
+  try {
+    const r = await api("/api/settings/rubric/preview", jsonReq("POST", readRubric()));
+    pre.textContent = r.prompt; pre.style.display = "block";
+  } catch (e) { toast("Fix the score bands first."); }
+}
+
+async function resetRubric() {
+  if (!confirm("Reset weights, bands, and your extra criteria to the defaults?")) return;
+  // An empty object takes every server-side default, so the defaults live in one
+  // place (schemas.py) rather than being duplicated here.
+  await api("/api/settings/rubric", jsonReq("PUT", {}));
+  await loadSetup(false); toast("Reset to defaults."); render();
+}
+
+async function runRescore() {
+  const est = await api("/api/jobs/rescore/estimate");
+  if (!est.jobs) return toast("No scored jobs to rescore.");
+  if (!confirm(`Rescore ${est.jobs} job${est.jobs > 1 ? "s" : ""} against the saved criteria?\n\nThat is ${est.calls} LLM call${est.calls > 1 ? "s" : ""} on the cheap tier.`)) return;
+  try { await api("/api/jobs/rescore", jsonReq("POST", { only_scored: true })); }
+  catch (e) { return toast(String(e.message || e).slice(0, 160)); }
+  APP.rescoring = true; APP.rescoreMsg = "starting…"; render();
+  poll("/api/jobs/rescore/status", s => {
+    APP.rescoreMsg = `${s.scored}/${s.total} ${s.message || ""}`;
+    const line = $("rescoreline"); if (line) line.textContent = "▸ " + APP.rescoreMsg;
+  }, s => {
+    APP.rescoring = false;
+    toast(s.error ? `Rescore failed: ${s.error}` : `Rescored ${s.scored} job${s.scored === 1 ? "" : "s"}.`);
+    render();
+  });
+}
+
+// Shared poller for the three background jobs. onTick must not call render():
+// it patches one element, so an open form keeps its focus and contents.
+function poll(url, onTick, onDone, ms = 900) {
+  const t = setInterval(async () => {
+    let s; try { s = await api(url); } catch (e) { clearInterval(t); return; }
+    onTick(s);
+    if (s.done) { clearInterval(t); onDone(s); }
+  }, ms);
+}
+
+// --- pane: email sources ---
+function paneSources() {
+  const saved = APP.setup.email_sources;
+  const found = APP.scan.senders;
+  const gmail = APP.setup.gmail_ready;
+
+  const savedRows = saved.length ? saved.map((s, i) => `
+    <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--color-divider)">
+      <input type="checkbox" class="srcbox" data-value="${esc(s.value)}" data-label="${esc(s.label)}" data-origin="${esc(s.origin)}" ${s.enabled ? "checked" : ""} style="accent-color:var(--color-accent)">
+      <span style="font-size:13.5px">${esc(s.value)}</span>
+      ${s.label ? `<span style="font-size:12px;color:var(--color-neutral-700)">${esc(s.label)}</span>` : ""}
+      <span class="tag tag-neutral" style="margin-left:auto">${esc(s.origin)}</span>
+      <button class="btn btn-ghost" style="font-size:16px;line-height:1;padding:2px 8px" onclick="dropSource(${i})" title="remove">×</button>
+    </div>`).join("")
+    : `<div style="font-size:13px;color:var(--color-neutral-700);padding:8px 0">
+         Nothing configured, so ingest uses the built-in list:
+         <span style="font-size:12px">${(APP.setup.effective_sources || []).map(v => esc(v)).join(", ")}</span>
+       </div>`;
+
+  const likely = found.filter(f => f.confidence !== "unknown");
+  const shown = APP.scan.show === "all" ? found : likely;
+  const scanRows = found.length ? `
+    <div style="display:flex;align-items:center;gap:12px;margin:16px 0 6px;flex-wrap:wrap">
+      <strong style="font-size:13.5px">${found.length} senders found</strong>
+      <span style="font-size:12.5px;color:var(--color-neutral-700)">${likely.length} look like job alerts</span>
+      <button class="btn btn-secondary" style="font-size:12px;padding:5px 10px;margin-left:auto" onclick="APP.scan.show='${APP.scan.show === "all" ? "likely" : "all"}';render()">
+        ${APP.scan.show === "all" ? "Show likely only" : `Show all ${found.length}`}
+      </button>
+    </div>
+    ${shown.length ? shown.map(f => `
+      <div style="display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--color-divider);${f.already_added ? "opacity:.5" : ""}">
+        <input type="checkbox" class="scanbox" data-value="${esc(f.domain)}" data-label="${esc(f.display_name)}"
+               ${f.confidence !== "unknown" && !f.already_added ? "checked" : ""} ${f.already_added ? "disabled" : ""} style="accent-color:var(--color-accent)">
+        <span style="font-size:13.5px">${esc(f.domain)}</span>
+        <span style="font-size:12px;color:var(--color-neutral-700)">${esc(f.display_name)} · ${f.count} email${f.count === 1 ? "" : "s"}</span>
+        ${f.already_added ? `<span class="tag tag-neutral" style="margin-left:auto">already added</span>`
+          : f.confidence === "heuristic" ? `<span class="tag tag-outline" style="margin-left:auto">job board</span>`
+          : f.confidence === "llm" ? `<span class="tag tag-accent" style="margin-left:auto">suggested</span>`
+          : `<span class="tag tag-neutral" style="margin-left:auto">unknown</span>`}
+      </div>
+      ${f.sample_subjects.length ? `<div style="font-size:11.5px;color:var(--color-neutral-600);padding:0 0 6px 32px">${f.sample_subjects.map(s => esc(s)).join(" · ")}</div>` : ""}
+    `).join("") : `<div style="font-size:13px;color:var(--color-neutral-700);padding:8px 0">None of the senders looked like job alerts. Try "Show all", or add one by hand below.</div>`}
+    <div style="margin-top:12px"><button class="btn btn-primary" onclick="addScanned()">Add ticked senders</button></div>` : "";
+
+  return paneHead("Which emails to scrape",
+    `Ingest reads job alerts from Gmail. Scan your inbox to find the senders automatically, or add one by hand. ${saved.length ? "" : "<strong>Nothing is configured yet, so ingest is using the built-in job-board list.</strong>"}`)
+    + `<h3 style="margin:0 0 8px;font-size:15px">Scan your inbox</h3>
+    ${gmail ? `
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <span style="font-size:12.5px;color:var(--color-neutral-800)">Sweeps the last</span>
+        <div class="seg">${[30, 90, 180].map(d => `<label class="seg-opt"><input type="radio" name="sd" value="${d}" ${d === 90 ? "checked" : ""} ${APP.scan.running ? "disabled" : ""}><span>${d}d</span></label>`).join("")}</div>
+        <span style="font-size:12.5px;color:var(--color-neutral-800)">of your Updates tab.</span>
+        <button class="btn btn-secondary" style="margin-left:auto" onclick="runScan()" ${APP.scan.running ? "disabled" : ""}>${APP.scan.running ? "Scanning…" : "Scan inbox"}</button>
+      </div>
+      <div id="scanline" style="font-size:12.5px;color:var(--color-neutral-700);margin-top:8px">${APP.scan.running ? "▸ " + esc(APP.scan.msg) : "Reads only sender and subject headers, never message bodies. A wide window takes a while."}</div>`
+    : `<div style="padding:12px;background:var(--color-neutral-100);font-size:13px">
+         Gmail is not authorised yet. Run <code>python -m pipeline</code> once in your terminal to sign in — a browser fetch cannot complete Google's consent flow — then come back and scan.
+       </div>`}
+    ${scanRows}
+    <hr class="hr">
+    <h3 style="margin:0 0 8px;font-size:15px">Add one by hand</h3>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="flex:1 1 300px;max-width:420px"><label>Address or domain</label>
+        <input id="src_new" class="input" placeholder="jobs@company.com   or   seek.com.au" onkeydown="if(event.key==='Enter')addSource()"></div>
+      <button class="btn btn-secondary" onclick="addSource()">Add</button>
+    </div>
+    <hr class="hr">
+    <h3 style="margin:0 0 8px;font-size:15px">Senders being scraped</h3>
+    ${savedRows}
+    <div style="margin-top:14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="saveSources()">Save sources</button>
+      <span style="font-size:12px;color:var(--color-neutral-700)">Unticking keeps a sender in the list but excludes it from the Gmail query.</span>
+    </div>`;
+}
+
+// Saved-list edits are staged in APP.setup and only persisted by Save, so a
+// mis-click is undone by leaving the pane.
+function dropSource(i) { APP.setup.email_sources.splice(i, 1); render(); }
+
+// Mirrors EmailSource._normalise on the server, so the duplicate check here
+// agrees with the one that actually de-duplicates on save.
+function normSource(v) {
+  v = (v || "").trim().toLowerCase();
+  if (v.includes("<") && v.includes(">")) v = v.slice(v.indexOf("<") + 1, v.indexOf(">")).trim();
+  return v.replace(/^@/, "");
+}
+
+function addSource() {
+  const v = normSource(val("src_new"));
+  if (!v) return;
+  if (APP.setup.email_sources.some(s => normSource(s.value) === v)) return toast("Already in the list.");
+  APP.setup.email_sources.push({ value: v, label: "", enabled: true, origin: "manual" });
+  render();
+}
+
+function addScanned() {
+  const picked = [...document.querySelectorAll(".scanbox")].filter(b => b.checked && !b.disabled);
+  if (!picked.length) return toast("Tick at least one sender.");
+  const have = new Set(APP.setup.email_sources.map(s => normSource(s.value)));
+  let added = 0;
+  picked.forEach(b => {
+    const v = normSource(b.dataset.value);
+    if (have.has(v)) return;
+    APP.setup.email_sources.push({ value: v, label: b.dataset.label, enabled: true, origin: "scan" });
+    have.add(v); added++;
+  });
+  toast(added ? `${added} added — press Save sources to keep them.` : "Those are already in the list.");
+  render();
+}
+
+async function saveSources() {
+  // Read the tick state back off the DOM so enable/disable toggles are picked up.
+  const sources = [...document.querySelectorAll(".srcbox")].map(b => ({
+    value: b.dataset.value, label: b.dataset.label,
+    enabled: b.checked, origin: b.dataset.origin || "manual" }));
+  try {
+    await api("/api/settings/senders", jsonReq("PUT", { sources }));
+    await loadSetup(false);
+    toast(`Saved — ${sources.filter(s => s.enabled).length} sender(s) active.`);
+    render();
+  } catch (e) { toast("Could not save sources."); }
+}
+
+async function runScan() {
+  const sel = document.querySelector('input[name="sd"]:checked');
+  const days = sel ? Number(sel.value) : 90;
+  try { await api("/api/settings/senders/scan", jsonReq("POST", { days })); }
+  catch (e) { return toast(String(e.message || e).slice(0, 180)); }
+  APP.scan.running = true; APP.scan.msg = "starting…"; APP.scan.senders = []; render();
+  poll("/api/settings/senders/scan/status", s => {
+    APP.scan.msg = s.message || `scanned ${s.scanned || 0}…`;
+    const line = $("scanline"); if (line) line.textContent = "▸ " + APP.scan.msg;
+  }, s => {
+    APP.scan.running = false;
+    APP.scan.senders = s.senders || [];
+    if (s.error) toast(`Scan failed: ${s.error}`);
+    else toast(`Found ${APP.scan.senders.length} senders.`);
+    render();
+  });
+}
+
+// Boot: settings first, so the banner and the board's score bands are correct on
+// the first paint rather than flickering in a moment later.
+loadSetup(false).catch(() => {}).finally(loadBoard);
 </script>
 </body>
 </html>

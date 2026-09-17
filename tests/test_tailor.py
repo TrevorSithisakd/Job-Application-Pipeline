@@ -74,6 +74,22 @@ def fake_llm(monkeypatch):
     return cfg, calls
 
 
+@pytest.fixture(autouse=True)
+def temp_fact_bank(tmp_path, monkeypatch):
+    """Give the tailor a fact bank of its own.
+
+    These tests used to depend on a real data/fact_bank.md existing on the
+    machine running them — it is gitignored, so a fresh clone failed. Pointing
+    the stage at a temp file keeps them hermetic while still exercising the real
+    read (rather than stubbing fact_bank() out entirely).
+    """
+    fb = tmp_path / "fact_bank.md"
+    fb.write_text("- Ran walk-forward cross-validation on a forecasting project.\n",
+                  encoding="utf-8")
+    monkeypatch.setattr("stages.tailor.FACT_BANK_FILE", fb)
+    return fb
+
+
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     """Redirect the DB and resume output to a temp dir, init the schema, and seed

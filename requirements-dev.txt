@@ -2,6 +2,7 @@
 -r requirements.txt
 
 pytest>=8
+httpx                # FastAPI TestClient (tests/test_api_settings.py)
 
 # Exact one-page fill check (stages/fillcheck.check_fill). Needs MS Word
 # (docx2pdf) or LibreOffice installed. The deployed app doesn't use these — the
