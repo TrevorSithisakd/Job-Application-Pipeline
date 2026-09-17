@@ -26,7 +26,7 @@ from typing import Type, TypeVar
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel
-from paths import ENV_FILE
+import paths
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -55,7 +55,7 @@ def _api_key() -> str | None:
     Re-reading on every call is deliberate: the Setup pane rewrites .env at
     runtime, and the new value has to be visible without a restart.
     """
-    load_dotenv(ENV_FILE, override=False)
+    load_dotenv(paths.ENV_FILE, override=False)
     key = os.environ.get("DEEPSEEK_API_KEY")
     return key.strip() if key and key.strip() else None
 

@@ -8,6 +8,7 @@ chicken-and-egg this whole feature rests on, and it deserves a regression test.
 from __future__ import annotations
 
 import io
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 import api
 import db
 import llm
+import paths
 import settings
 from schemas import FactBankDoc, FactItem, FactSection
 from stages import factbank, ingest
@@ -22,10 +24,18 @@ from stages import factbank, ingest
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """A fully isolated app: temp DB, temp settings, temp .env, no real key."""
+    """A fully isolated app: temp DB, temp settings, temp .env, no real key.
+
+    `paths.ENV_FILE` is the one that matters. llm._api_key() calls load_dotenv on
+    it for every key read, so if it still points at the developer's REAL .env,
+    monkeypatch.delenv is undone the instant anything asks for the key — and
+    every "without a key" test silently becomes a "with a key" test. That is why
+    llm.py and settings.py both reach it through the module rather than taking
+    their own `from paths import ENV_FILE` copy: one binding, one thing to patch.
+    """
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "test.db")
+    monkeypatch.setattr(paths, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(settings, "SETTINGS_FILE", tmp_path / "settings.json")
-    monkeypatch.setattr(settings, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(settings, "PROFILE_FILE", tmp_path / "profile.md")
     monkeypatch.setattr(settings, "FACT_BANK_FILE", tmp_path / "fact_bank.md")
     monkeypatch.setattr(settings, "PROFILE_EXAMPLE", tmp_path / "profile.example.md")
@@ -34,6 +44,48 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "_client", None)
     db.init()
     return TestClient(api.app)
+
+
+@pytest.fixture(autouse=True)
+def idle_background_jobs():
+    """Reset the background-job singletons around every test.
+
+    api._ingest/_rescore/_scan are module-level and refuse to start while a run
+    is in flight. One test that accidentally kicks off a real run therefore makes
+    the NEXT tests 409 and quietly do nothing — which is exactly how a single
+    leaked API key turned into three unrelated failures. Each test gets an idle
+    slot, and any thread it started is drained before the next one begins.
+    """
+    for job in (api._ingest, api._rescore, api._scan):
+        job.state.update(running=False, done=True, error=None)
+    yield
+    for job in (api._ingest, api._rescore, api._scan):
+        _drain(job)
+        job.state.update(running=False, done=True, error=None)
+
+
+def _drain(job, timeout=5.0):
+    """Wait for a background job to finish, so its worker can't write into the
+    next test's temp DB after monkeypatch has torn the paths down."""
+    deadline = time.time() + timeout
+    while job.running and time.time() < deadline:
+        time.sleep(0.01)
+
+
+def _wait(client, url, timeout=5.0):
+    """Poll a /status endpoint until done.
+
+    Sleeps. The first version spun on 100 back-to-back requests with no delay,
+    which passed on a fast Linux box and raced on slower machines — a test that
+    reports "0 scored" because the worker simply had not started yet.
+    """
+    deadline = time.time() + timeout
+    status = client.get(url).json()
+    while not status["done"] and time.time() < deadline:
+        time.sleep(0.02)
+        status = client.get(url).json()
+    assert status["done"], f"{url} did not finish within {timeout}s"
+    return status
 
 
 # --- the blocker this feature rests on ---------------------------------------
@@ -78,7 +130,7 @@ def test_saving_a_key_writes_env_and_clears_the_cached_client(client, monkeypatc
     monkeypatch.setattr(llm, "_client", "stale-sentinel")
     r = client.post("/api/settings/key", json={"key": "sk-brand-new"})
     assert r.status_code == 200
-    assert "DEEPSEEK_API_KEY=sk-brand-new" in settings.ENV_FILE.read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=sk-brand-new" in paths.ENV_FILE.read_text(encoding="utf-8")
     assert llm._client is None, "cached client must be dropped or the old key keeps winning"
 
 
@@ -236,10 +288,7 @@ def test_scan_runs_and_reports_results(client, monkeypatch):
          "already_added": False}])
 
     assert client.post("/api/settings/senders/scan", json={"days": 90}).json()["started"]
-    for _ in range(100):                       # the worker is a real thread
-        status = client.get("/api/settings/senders/scan/status").json()
-        if status["done"]:
-            break
+    status = _wait(client, "/api/settings/senders/scan/status")
     assert status["error"] is None
     assert status["senders"][0]["domain"] == "seek.com.au"
 
@@ -252,10 +301,7 @@ def test_scan_surfaces_a_worker_error_instead_of_hanging(client, monkeypatch):
 
     monkeypatch.setattr(ingest, "discover_senders", boom)
     client.post("/api/settings/senders/scan", json={"days": 90})
-    for _ in range(100):
-        status = client.get("/api/settings/senders/scan/status").json()
-        if status["done"]:
-            break
+    status = _wait(client, "/api/settings/senders/scan/status")
     assert "gmail exploded" in status["error"]
     assert status["running"] is False
 
@@ -295,10 +341,7 @@ def test_rescore_applies_the_new_criteria(client, monkeypatch):
         score=91, rationale="now a strong match", track="none"))
 
     client.post("/api/jobs/rescore", json={"only_scored": True})
-    for _ in range(100):
-        status = client.get("/api/jobs/rescore/status").json()
-        if status["done"]:
-            break
+    status = _wait(client, "/api/jobs/rescore/status")
     assert status["error"] is None and status["scored"] == 1
     assert db.get_job_row(jid)["fit_score"] == 91
 
@@ -318,8 +361,5 @@ def test_one_bad_job_does_not_abandon_the_batch(client, monkeypatch):
 
     monkeypatch.setattr(api.fitscore, "fit_score", flaky)
     client.post("/api/jobs/rescore", json={"only_scored": True})
-    for _ in range(100):
-        status = client.get("/api/jobs/rescore/status").json()
-        if status["done"]:
-            break
+    status = _wait(client, "/api/jobs/rescore/status")
     assert status["scored"] == 1 and status["skipped"] == 1

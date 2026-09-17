@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import pytest
 
+import paths
 import settings
 from schemas import (AppSettings, EmailSource, JobPreferences, RubricDimension,
                      ScoringRubric)
@@ -23,7 +24,7 @@ def temp_settings(tmp_path, monkeypatch):
     """Point every settings path at a temp dir. Without this the suite would
     read and overwrite the developer's real .env and data/settings.json."""
     monkeypatch.setattr(settings, "SETTINGS_FILE", tmp_path / "settings.json")
-    monkeypatch.setattr(settings, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(paths, "ENV_FILE", tmp_path / ".env")
     monkeypatch.setattr(settings, "PROFILE_FILE", tmp_path / "profile.md")
     monkeypatch.setattr(settings, "FACT_BANK_FILE", tmp_path / "fact_bank.md")
     monkeypatch.setattr(settings, "PROFILE_EXAMPLE", tmp_path / "profile.example.md")
@@ -137,13 +138,13 @@ def test_set_api_key_preserves_other_lines(temp_settings, monkeypatch):
     """.env is hand-edited and may hold comments and unrelated variables, so the
     writer rewrites one line rather than regenerating the file."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    settings.ENV_FILE.write_text(
+    paths.ENV_FILE.write_text(
         "# my notes\nOTHER_VAR=keep-me\nDEEPSEEK_API_KEY=sk-old\nTRAILING=yes\n",
         encoding="utf-8")
 
     settings.set_api_key("sk-new")
 
-    text = settings.ENV_FILE.read_text(encoding="utf-8")
+    text = paths.ENV_FILE.read_text(encoding="utf-8")
     assert "# my notes" in text
     assert "OTHER_VAR=keep-me" in text
     assert "TRAILING=yes" in text
@@ -153,16 +154,16 @@ def test_set_api_key_preserves_other_lines(temp_settings, monkeypatch):
 
 def test_set_api_key_appends_when_absent(temp_settings, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    settings.ENV_FILE.write_text("OTHER=1\n", encoding="utf-8")
+    paths.ENV_FILE.write_text("OTHER=1\n", encoding="utf-8")
     settings.set_api_key("sk-fresh")
-    text = settings.ENV_FILE.read_text(encoding="utf-8")
+    text = paths.ENV_FILE.read_text(encoding="utf-8")
     assert "OTHER=1" in text and "DEEPSEEK_API_KEY=sk-fresh" in text
 
 
 def test_set_api_key_creates_the_file(temp_settings, monkeypatch):
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     settings.set_api_key("sk-created")
-    assert "DEEPSEEK_API_KEY=sk-created" in settings.ENV_FILE.read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=sk-created" in paths.ENV_FILE.read_text(encoding="utf-8")
 
 
 def test_set_api_key_updates_the_live_process(monkeypatch):
@@ -178,6 +179,34 @@ def test_set_api_key_updates_the_live_process(monkeypatch):
 def test_set_api_key_rejects_empty():
     with pytest.raises(ValueError):
         settings.set_api_key("   ")
+
+
+def test_env_path_has_exactly_one_binding(temp_settings, monkeypatch):
+    """Guard against a whole class of bug that shipped once already.
+
+    llm.py and settings.py must both reach .env through the `paths` MODULE. When
+    either took its own `from paths import ENV_FILE` copy, patching one left the
+    other pointing at the developer's real .env — so every "no API key" test
+    quietly read a live key and passed for the wrong reason on a machine that had
+    one. Writing through settings must be visible to llm, and only there.
+    """
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    import llm
+
+    assert not hasattr(settings, "ENV_FILE"), \
+        "settings must not shadow paths.ENV_FILE with its own binding"
+    assert not hasattr(llm, "ENV_FILE"), \
+        "llm must not shadow paths.ENV_FILE with its own binding"
+
+    settings.set_api_key("sk-written-here")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)   # force a file read
+    assert llm._api_key() == "sk-written-here"
+
+    # And with the temp file pointed elsewhere, no key is visible — proving the
+    # read really followed the patched path rather than a real .env on disk.
+    monkeypatch.setattr(paths, "ENV_FILE", temp_settings / "nonexistent.env")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    assert llm._api_key() is None
 
 
 def test_api_key_status_never_leaks_the_key(monkeypatch):
