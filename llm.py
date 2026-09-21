@@ -49,8 +49,7 @@ _client: OpenAI | None = None   # built on first use, dropped by reset_client()
 def _api_key() -> str | None:
     """The key, or None. Loads .env from the project root (not the cwd) so this
     works whatever directory you launched from. load_dotenv does NOT override an
-    existing environment variable, so a real env var still wins over the file —
-    which is what the Render deploy relies on.
+    existing environment variable, so a real env var still wins over the file.
 
     Re-reading on every call is deliberate: the Setup pane rewrites .env at
     runtime, and the new value has to be visible without a restart.
