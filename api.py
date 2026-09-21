@@ -23,13 +23,12 @@ import seed
 import settings
 from paths import ROOT
 
-# Materialise the demo persona on a bare/cloud deploy (or your PROFILE_MD /
-# FACT_BANK_MD env vars). A no-op on a real local setup.
+# Copy the example profile / fact bank into place on a fresh install, as a
+# template for Setup to show. A no-op once you have your own.
 #
 # This used to be load-bearing for the imports below, which read profile.md /
 # fact_bank.md at import time and crashed without them. They are read lazily now,
-# so this is purely about seeding a demo — the app boots either way, and the
-# Setup pane is how you fill these in for real.
+# so the app boots either way.
 seed.ensure_files()
 
 import llm
@@ -40,7 +39,6 @@ from stages import factbank, fitscore, ingest
 from stages.tailor import tailor_job
 
 db.init()          # schema + grounding migration
-seed.ensure_seed() # populate a few demo jobs if the DB is empty (no-op if not)
 
 app = FastAPI(title="Job Application Pipeline")
 

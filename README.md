@@ -82,8 +82,7 @@ in the top nav — nothing needs a file editor or a restart.
 Paste your [DeepSeek key](https://platform.deepseek.com/api_keys) into the
 **API key** pane and press **Test key** to confirm it works before spending a
 real run finding out it doesn't. It's written to `.env`, which is gitignored. A
-real `DEEPSEEK_API_KEY` environment variable still takes priority (that's what
-the cloud deploy uses).
+real `DEEPSEEK_API_KEY` environment variable still takes priority.
 
 ### 2. Your profile and fact bank (required)
 Under **Profile & fact bank**:
@@ -159,34 +158,6 @@ pip install -r requirements-dev.txt
 python -m pytest -q       # offline; LLM calls are mocked
 ```
 
-## Deploy a demo (Render)
-
-The app is a persistent server, so use a host that runs containers (not
-Vercel/Pages). A `Dockerfile` is included, so **Render** (or Railway / Fly / HF
-Spaces) builds it directly — no Word/LibreOffice needed (the one-page fit uses the
-pure-Python estimator). A fresh deploy boots **populated**: `seed.py` creates a
-demo persona and a few sample jobs automatically, so nothing personal is required.
-
-1. Push this repo to GitHub.
-2. Render → **New → Web Service** → connect the repo. It detects the `Dockerfile`.
-3. Environment variables:
-   - `DEEPSEEK_API_KEY` — the app now boots without it and shows the Setup page,
-     but set it here anyway: on an ephemeral free tier a key entered in the UI is
-     written to `.env` and lost on the next restart, while an env var survives.
-     An env var also takes priority over anything Setup writes.
-   - *(optional)* `FACT_BANK_MD` / `PROFILE_MD` — paste your **real** fact bank /
-     profile content to tailor authentic resumes in the demo. Omit to use the demo
-     persona. This keeps your personal data out of the public repo.
-4. Deploy → Render gives you a public HTTPS URL.
-
-**For an interview:**
-- The free tier **sleeps when idle** (~30-50s cold start) — open the URL a few
-  minutes before the call to warm it, or use an always-on tier / Railway.
-- State is **ephemeral** on free tiers: the DB re-seeds clean on each restart (fine
-  for a demo; add a persistent disk if you want changes to persist).
-- **No auth** — anyone with the link can use it (and spend your API key). Fine for a
-  private interview link; don't post it publicly.
-
 ## Project structure
 
 | Path | Role |
@@ -206,8 +177,7 @@ demo persona and a few sample jobs automatically, so nothing personal is require
 | `api.py` | FastAPI: JSON API + serves the frontend |
 | `frontend/` | The web UI, incl. the Setup pane (no build step) |
 | `run_app.py` / `givemeajob.bat` | One-click launcher |
-| `seed.py` | Boot helper: demo data + example/env fallback (for cloud deploys) |
-| `Dockerfile` / `.dockerignore` | Container build for Render/Railway/Fly/HF Spaces |
+| `seed.py` | Boot helper: copies the example profile/fact bank in on a fresh install |
 | `data/*.example.md` | Templates for your profile + fact bank |
 
 ## Privacy

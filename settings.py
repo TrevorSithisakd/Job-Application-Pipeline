@@ -5,8 +5,7 @@ TWO stores, because the two kinds of value want different homes:
   API key   -> .env          Already gitignored, already what llm.py reads, and
                              already what the README and Privacy section promise.
                              A real environment variable still wins over the file
-                             (load_dotenv does not override), which is what the
-                             Render deploy depends on.
+                             (load_dotenv does not override).
   Everything else -> data/settings.json   Structured, non-secret, validated
                              through the pydantic models in schemas.py.
 
@@ -121,7 +120,7 @@ def api_key_status() -> dict:
     secret, and the pane only needs to confirm which one is loaded.
 
     `source` matters: when the key comes from a real environment variable
-    (a Render dashboard), writing .env will NOT change what the app uses, so the
+    (set in the shell or system settings), writing .env will NOT change what the app uses, so the
     UI has to say so instead of silently no-opping.
     """
     import llm
