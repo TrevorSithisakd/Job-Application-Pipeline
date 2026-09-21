@@ -36,3 +36,7 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# Claude Code (personal workflow config)
+.claude/
+CLAUDE.md
