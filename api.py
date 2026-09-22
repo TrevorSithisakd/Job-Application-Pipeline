@@ -370,6 +370,23 @@ def get_settings() -> dict:
     }
 
 
+@app.get("/api/setup/status")
+def setup_status() -> dict:
+    """What the frontend asks on boot: wizard or board?"""
+    return settings.setup_status()
+
+
+@app.post("/api/setup/complete")
+def complete_setup() -> dict:
+    """The wizard's final button. Re-checks on the server rather than trusting the
+    page: the gate is only worth anything if skipping the UI can't bypass it."""
+    missing = [k for k, ok in settings.required_items().items() if not ok]
+    if missing:
+        raise HTTPException(409, {"message": "Setup is not finished yet.", "missing": missing})
+    settings.mark_setup_complete()
+    return settings.setup_status()
+
+
 class KeyReq(BaseModel):
     key: str
 

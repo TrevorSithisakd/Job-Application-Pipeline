@@ -177,6 +177,46 @@ def set_fact_bank(content: str) -> int:
     return _write_doc(FACT_BANK_FILE, content)
 
 
+# --- first-run setup gate ----------------------------------------------------
+
+def required_items() -> dict[str, bool]:
+    """Which of the four things the wizard insists on are in place RIGHT NOW.
+
+    A document counts only if it has real content AND differs from its shipped
+    template: seed.ensure_files() copies the example in on first boot, so "the
+    file exists" is true on every fresh install and means nothing.
+
+    credentials_ready() is imported lazily (same reason as llm above) and looked
+    up through the module, so tests can swap it for a switch.
+    """
+    from stages import ingest
+
+    def filled_in(doc: dict) -> bool:
+        return bool(doc["content"].strip()) and not doc["is_example"]
+
+    return {
+        "key": api_key_status()["configured"],
+        "profile": filled_in(get_profile()),
+        "fact_bank": filled_in(get_fact_bank()),
+        "gmail": ingest.credentials_ready(),
+    }
+
+
+def mark_setup_complete() -> AppSettings:
+    s = load()
+    s.setup_completed = True
+    return save(s)
+
+
+def setup_status() -> dict:
+    """Should the app open on the wizard or the board?
+
+    Returns {"completed": bool, "required": {item: bool}, "missing": [item, ...]}.
+    """
+    # TODO(human)
+    raise NotImplementedError
+
+
 # --- email sources -----------------------------------------------------------
 
 # The senders the app shipped with, before the list was configurable. Still the

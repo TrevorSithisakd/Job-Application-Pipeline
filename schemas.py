@@ -255,6 +255,10 @@ class AppSettings(BaseModel):
     # False until the user has actually been through sender setup. Distinguishes
     # "no sources chosen yet" (offer the scan) from "deliberately chose none".
     sources_configured: bool = False
+    # False until the first-run wizard has been passed once. A latch, not a live
+    # check: it stays True if something required breaks later (an expired Gmail
+    # token), because that deserves a banner, not a locked-out board.
+    setup_completed: bool = False
 
     def enabled_sources(self) -> list[str]:
         return [s.value for s in self.email_sources if s.enabled]
