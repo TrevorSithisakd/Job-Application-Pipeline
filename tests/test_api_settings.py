@@ -363,3 +363,81 @@ def test_one_bad_job_does_not_abandon_the_batch(client, monkeypatch):
     client.post("/api/jobs/rescore", json={"only_scored": True})
     status = _wait(client, "/api/jobs/rescore/status")
     assert status["scored"] == 1 and status["skipped"] == 1
+
+
+# --- setup gate (first run) --------------------------------------------------
+# The wizard blocks the board until four things exist: a key, a real profile, a
+# real fact bank, and Gmail access. It is a FIRST-RUN gate: once passed, losing
+# one of them later (Gmail tokens expire weekly in Testing mode) must not lock
+# you out of your own board again.
+
+REQUIRED = {"key", "profile", "fact_bank", "gmail"}
+
+
+@pytest.fixture
+def gmail(monkeypatch):
+    """Gmail auth as a switch. The real credentials_ready() reads the developer's
+    token.json, so an unpatched "fresh install" test would pass on a clean clone
+    and fail on a machine that has signed in — or the other way round."""
+    state = {"ready": False}
+    monkeypatch.setattr(ingest, "credentials_ready", lambda: state["ready"])
+    return state
+
+
+def _fill_required(client, gmail):
+    """Everything the gate asks for, done through the same endpoints the wizard
+    uses rather than by writing files directly."""
+    client.post("/api/settings/key", json={"key": "sk-test-0123456789"})
+    client.put("/api/settings/profile", json={"content": "# Me\nML engineer."})
+    client.put("/api/settings/factbank", json={"content": "- Built a forecasting model."})
+    gmail["ready"] = True
+
+
+def test_fresh_install_is_not_set_up(client, gmail):
+    body = client.get("/api/setup/status").json()
+    assert body["completed"] is False
+    assert set(body["missing"]) == REQUIRED
+    assert body["required"] == {k: False for k in REQUIRED}
+
+
+def test_complete_is_refused_and_names_what_is_missing(client, gmail):
+    client.post("/api/settings/key", json={"key": "sk-test-0123456789"})
+    r = client.post("/api/setup/complete")
+    assert r.status_code == 409
+    assert set(r.json()["detail"]["missing"]) == {"profile", "fact_bank", "gmail"}
+    assert settings.load().setup_completed is False, "a refused complete must not persist"
+
+
+def test_complete_succeeds_once_everything_is_in_place(client, gmail):
+    _fill_required(client, gmail)
+    r = client.post("/api/setup/complete")
+    assert r.status_code == 200
+    assert r.json()["completed"] is True
+    assert settings.load().setup_completed is True
+
+
+def test_example_or_blank_documents_do_not_count(client, gmail):
+    """The copied template is byte-identical to the example, and a blank file is
+    not a profile. Either one would score jobs against nobody in particular."""
+    settings.PROFILE_EXAMPLE.write_text("# Demo persona", encoding="utf-8")
+    client.put("/api/settings/profile", json={"content": "# Demo persona"})
+    client.put("/api/settings/factbank", json={"content": "   \n"})
+    required = client.get("/api/setup/status").json()["required"]
+    assert required["profile"] is False
+    assert required["fact_bank"] is False
+
+
+def test_an_existing_install_is_let_straight_through(client, gmail):
+    """Someone who set everything up before the wizard existed must never be
+    walked through it: all four present on first look counts as done."""
+    _fill_required(client, gmail)
+    assert client.get("/api/setup/status").json()["completed"] is True
+    assert settings.load().setup_completed is True, "should be remembered, not recomputed"
+
+
+def test_losing_gmail_after_setup_does_not_reopen_the_gate(client, gmail):
+    _fill_required(client, gmail)
+    client.post("/api/setup/complete")
+    gmail["ready"] = False                     # the weekly token expiry
+    body = client.get("/api/setup/status").json()
+    assert body["completed"] is True

@@ -177,6 +177,69 @@ def set_fact_bank(content: str) -> int:
     return _write_doc(FACT_BANK_FILE, content)
 
 
+# --- first-run setup gate ----------------------------------------------------
+
+def required_items() -> dict[str, bool]:
+    """Which of the four things the wizard insists on are in place RIGHT NOW.
+
+    A document counts only if it has real content AND differs from its shipped
+    template: seed.ensure_files() copies the example in on first boot, so "the
+    file exists" is true on every fresh install and means nothing.
+
+    credentials_ready() is imported lazily (same reason as llm above) and looked
+    up through the module, so tests can swap it for a switch.
+    """
+    from stages import ingest
+
+    def filled_in(doc: dict) -> bool:
+        return bool(doc["content"].strip()) and not doc["is_example"]
+
+    return {
+        "key": api_key_status()["configured"],
+        "profile": filled_in(get_profile()),
+        "fact_bank": filled_in(get_fact_bank()),
+        "gmail": ingest.credentials_ready(),
+    }
+
+
+def mark_setup_complete() -> AppSettings:
+    s = load()
+    s.setup_completed = True
+    return save(s)
+
+
+def setup_status() -> dict:
+    """Should the app open on the wizard or the board?
+
+    Returns {"completed": bool, "required": {item: bool}, "missing": [item, ...]}.
+
+    `completed` is a LATCH, not a live check: once the saved flag is set it stays
+    set, so a Gmail token that expires next week shows a banner instead of
+    throwing the user back into the wizard they already finished.
+
+    An install that already has all four items has, in effect, done the setup —
+    so it is marked complete on the spot rather than being walked through a
+    wizard that would ask it for nothing. That is a write during a GET, which is
+    normally worth avoiding, but it is idempotent: running it twice leaves the
+    same flag set, so a duplicated or retried request changes nothing.
+
+    `required` stays live even after completion. It is what the Settings pane and
+    the "Reconnect Gmail" banner read to show what is currently broken.
+    """
+    required = required_items()
+    completed = load().setup_completed
+
+    if not completed and all(required.values()):
+        mark_setup_complete()
+        completed = True
+
+    return {
+        "completed": completed,
+        "required": required,
+        "missing": [item for item, ok in required.items() if not ok],
+    }
+
+
 # --- email sources -----------------------------------------------------------
 
 # The senders the app shipped with, before the list was configurable. Still the
